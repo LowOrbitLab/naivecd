@@ -83,6 +83,29 @@ readonly SINGBOX_CONFIG="/root/naive-singbox.json"
 readonly SYSTEMD_UNIT="/etc/systemd/system/caddy.service"
 readonly TMP_BUILD_DIR="/root/tmp"
 readonly GO_INSTALL_DIR="/usr/local/go"
+readonly STATE_FILE="${CADDY_DIR}/naivecd-managed.env"
+readonly BACKUP_ROOT="/root/naivecd-backups"
+readonly CADDY_USER="caddy"
+readonly CADDY_GROUP="caddy"
+readonly CADDY_STATE_DIR="/var/lib/caddy"
+
+STATE_LOADED=0
+NAIVECD_MANAGED=0
+MANAGED_CADDY_DIR_CREATED=0
+MANAGED_CADDY_BIN=0
+MANAGED_SYSTEMD_UNIT=0
+MANAGED_CADDYFILE=0
+MANAGED_CRED_FILE=0
+MANAGED_CLIENT_CONFIG=0
+MANAGED_SINGBOX_CONFIG=0
+MANAGED_STATIC_ROOT_CREATED=0
+MANAGED_STATIC_INDEX=0
+MANAGED_GO=0
+MANAGED_CADDY_USER_CREATED=0
+MANAGED_CADDY_GROUP_CREATED=0
+STATE_STATIC_ROOT=""
+STATE_STATIC_INDEX_SHA256=""
+BACKUP_SESSION_DIR=""
 
 #─────────────────────────────────────────────────────────────────────────────
 # Preflight
@@ -177,64 +200,244 @@ check_ports() {
     ok "Ports 80 and 443 are available"
 }
 
+reset_managed_state() {
+    STATE_LOADED=0
+    NAIVECD_MANAGED=0
+    MANAGED_CADDY_DIR_CREATED=0
+    MANAGED_CADDY_BIN=0
+    MANAGED_SYSTEMD_UNIT=0
+    MANAGED_CADDYFILE=0
+    MANAGED_CRED_FILE=0
+    MANAGED_CLIENT_CONFIG=0
+    MANAGED_SINGBOX_CONFIG=0
+    MANAGED_STATIC_ROOT_CREATED=0
+    MANAGED_STATIC_INDEX=0
+    MANAGED_GO=0
+    MANAGED_CADDY_USER_CREATED=0
+    MANAGED_CADDY_GROUP_CREATED=0
+    STATE_STATIC_ROOT=""
+    STATE_STATIC_INDEX_SHA256=""
+}
+
+load_managed_state() {
+    reset_managed_state
+    [[ -r "$STATE_FILE" ]] || return 0
+
+    local key value
+    while IFS='=' read -r key value; do
+        [[ -n "$key" && "$key" != \#* ]] || continue
+        case "$key" in
+            NAIVECD_MANAGED|MANAGED_CADDY_DIR_CREATED|MANAGED_CADDY_BIN|MANAGED_SYSTEMD_UNIT|\
+            MANAGED_CADDYFILE|MANAGED_CRED_FILE|MANAGED_CLIENT_CONFIG|MANAGED_SINGBOX_CONFIG|\
+            MANAGED_STATIC_ROOT_CREATED|MANAGED_STATIC_INDEX|MANAGED_GO|\
+            MANAGED_CADDY_USER_CREATED|MANAGED_CADDY_GROUP_CREATED|STATE_STATIC_ROOT|\
+            STATE_STATIC_INDEX_SHA256)
+                printf -v "$key" '%s' "$value"
+                ;;
+        esac
+    done < "$STATE_FILE"
+
+    [[ "$NAIVECD_MANAGED" == "1" ]] && STATE_LOADED=1
+}
+
+write_managed_state() {
+    mkdir -p "$CADDY_DIR"
+    local tmp="${STATE_FILE}.tmp"
+    {
+        printf '# Managed by naivecd. This file records resources created by the installer.\n'
+        printf '# Generated: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'NAIVECD_MANAGED=1\n'
+        printf 'MANAGED_CADDY_DIR_CREATED=%s\n' "$MANAGED_CADDY_DIR_CREATED"
+        printf 'MANAGED_CADDY_BIN=%s\n' "$MANAGED_CADDY_BIN"
+        printf 'MANAGED_SYSTEMD_UNIT=%s\n' "$MANAGED_SYSTEMD_UNIT"
+        printf 'MANAGED_CADDYFILE=%s\n' "$MANAGED_CADDYFILE"
+        printf 'MANAGED_CRED_FILE=%s\n' "$MANAGED_CRED_FILE"
+        printf 'MANAGED_CLIENT_CONFIG=%s\n' "$MANAGED_CLIENT_CONFIG"
+        printf 'MANAGED_SINGBOX_CONFIG=%s\n' "$MANAGED_SINGBOX_CONFIG"
+        printf 'MANAGED_STATIC_ROOT_CREATED=%s\n' "$MANAGED_STATIC_ROOT_CREATED"
+        printf 'MANAGED_STATIC_INDEX=%s\n' "$MANAGED_STATIC_INDEX"
+        printf 'MANAGED_GO=%s\n' "$MANAGED_GO"
+        printf 'MANAGED_CADDY_USER_CREATED=%s\n' "$MANAGED_CADDY_USER_CREATED"
+        printf 'MANAGED_CADDY_GROUP_CREATED=%s\n' "$MANAGED_CADDY_GROUP_CREATED"
+        printf 'STATE_STATIC_ROOT=%s\n' "${STATE_STATIC_ROOT:-}"
+        printf 'STATE_STATIC_INDEX_SHA256=%s\n' "${STATE_STATIC_INDEX_SHA256:-}"
+    } > "$tmp"
+    chown root:root "$tmp"
+    chmod 0600 "$tmp"
+    mv "$tmp" "$STATE_FILE"
+}
+
+file_sha256() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+ensure_backup_dir() {
+    if [[ -z "$BACKUP_SESSION_DIR" ]]; then
+        BACKUP_SESSION_DIR="${BACKUP_ROOT}/$(date -u +%Y%m%dT%H%M%SZ)"
+        mkdir -p "$BACKUP_SESSION_DIR"
+        chmod 0700 "$BACKUP_ROOT" "$BACKUP_SESSION_DIR"
+    fi
+}
+
+backup_path() {
+    local path="$1" reason="${2:-backup}" rel dest
+    [[ -e "$path" || -L "$path" ]] || return 0
+
+    ensure_backup_dir
+    rel="${path#/}"
+    dest="${BACKUP_SESSION_DIR}/${rel}"
+    mkdir -p "$(dirname "$dest")"
+    cp -a -- "$path" "$dest"
+    ok "Backed up ${path} (${reason}) to ${dest}"
+}
+
+file_has_naivecd_marker() {
+    local path="$1"
+    [[ -r "$path" ]] && grep -Fq "Managed by naivecd" "$path"
+}
+
+remove_managed_file() {
+    local path="$1"
+    [[ -e "$path" || -L "$path" ]] || return 0
+    backup_path "$path" "before uninstall"
+    rm -f -- "$path"
+    ok "Removed ${path}"
+}
+
 uninstall_caddy_naive() {
-    local static_root_to_remove=""
-    if [[ -s "$CADDYFILE" ]]; then
-        static_root_to_remove="$(awk '/^[[:space:]]*root[[:space:]]+\*[[:space:]]/ {print $3; exit}' "$CADDYFILE")"
+    load_managed_state
+
+    local unit_managed=0 caddyfile_managed=0 cred_managed=0 static_root_to_review=""
+    # State alone is not enough for text files that users may have replaced after
+    # installation. Require the current file to still carry the naivecd marker
+    # before stopping/removing it; otherwise preserve it as user-managed data.
+    file_has_naivecd_marker "$SYSTEMD_UNIT" && unit_managed=1
+    file_has_naivecd_marker "$CADDYFILE" && caddyfile_managed=1
+    file_has_naivecd_marker "$CRED_FILE" && cred_managed=1
+
+    static_root_to_review="${STATE_STATIC_ROOT:-}"
+    if [[ -z "$static_root_to_review" && "$caddyfile_managed" == "1" && -s "$CADDYFILE" ]]; then
+        static_root_to_review="$(awk '/^[[:space:]]*root[[:space:]]+\*[[:space:]]/ {print $3; exit}' "$CADDYFILE")"
     fi
-    static_root_to_remove="${static_root_to_remove:-$DEFAULT_STATIC_ROOT}"
 
     echo >&2
-    warn "This will remove:" >&2
-    echo "    - caddy.service" >&2
-    echo "    - ${CADDY_BIN}" >&2
-    echo "    - ${CADDY_DIR}/" >&2
-    echo "    - generated client configs" >&2
-    echo "    - ${static_root_to_remove}" >&2
-    echo >&2
-warn "Not managed by this script (yours to handle):" >&2
-    echo "    - DNS records / firewall rules (never touched by this script)" >&2
+    warn "Uninstall uses naivecd managed-state markers and preserves unmarked assets." >&2
+    if [[ "$STATE_LOADED" != "1" ]]; then
+        warn "No managed-state file was found; only files with a naivecd marker can be removed safely." >&2
+    fi
     echo >&2
 
-    local go_managed="no"
-    if [[ -x "${GO_INSTALL_DIR}/bin/go" ]]; then
-        warn "Found Go toolchain at ${GO_INSTALL_DIR}"
-        echo "    (installed during source build if NAIVE_CADDY_INSTALL=build was used)" >&2
-        if confirm "Remove Go too" default-no; then
-            go_managed="yes"
-        fi
+    local any=0
+    warn "This will remove only managed resources:" >&2
+    if [[ "$unit_managed" == "1" && -e "$SYSTEMD_UNIT" ]]; then
+        echo "    - ${SYSTEMD_UNIT}" >&2
+        any=1
     fi
+    if [[ "$MANAGED_CADDY_BIN" == "1" && -e "$CADDY_BIN" ]]; then
+        echo "    - ${CADDY_BIN}" >&2
+        any=1
+    fi
+    if [[ "$caddyfile_managed" == "1" && -e "$CADDYFILE" ]]; then
+        echo "    - ${CADDYFILE}" >&2
+        any=1
+    fi
+    if [[ "$cred_managed" == "1" && -e "$CRED_FILE" ]]; then
+        echo "    - ${CRED_FILE}" >&2
+        any=1
+    fi
+    if [[ "$MANAGED_CLIENT_CONFIG" == "1" && -e "$CLIENT_CONFIG" ]]; then
+        echo "    - ${CLIENT_CONFIG}" >&2
+        any=1
+    fi
+    if [[ "$MANAGED_SINGBOX_CONFIG" == "1" && -e "$SINGBOX_CONFIG" ]]; then
+        echo "    - ${SINGBOX_CONFIG}" >&2
+        any=1
+    fi
+    if [[ "$MANAGED_STATIC_INDEX" == "1" && -n "$static_root_to_review" ]]; then
+        echo "    - ${static_root_to_review}/index.html, if unchanged from the installer placeholder" >&2
+        any=1
+    fi
+    if [[ "$MANAGED_CADDY_DIR_CREATED" == "1" ]]; then
+        echo "    - ${CADDY_DIR}/, only if empty after managed files are removed" >&2
+        any=1
+    fi
+    if [[ "$MANAGED_STATIC_ROOT_CREATED" == "1" && -n "$static_root_to_review" ]]; then
+        echo "    - ${static_root_to_review}/, only if empty after the managed placeholder is removed" >&2
+        any=1
+    fi
+
+    echo >&2
+    warn "Preserved by default:" >&2
+    echo "    - unmarked Caddy files, Caddy data/certificates, and user static site content" >&2
+    echo "    - Go toolchains, DNS records, and firewall rules" >&2
+    if (( any == 0 )); then
+        echo >&2
+        warn "No managed resources were found to remove." >&2
+        return 0
+    fi
+
+    echo >&2
     confirm "Continue uninstall" default-no || die "Aborted by user."
 
-    if systemctl list-unit-files caddy.service >/dev/null 2>&1; then
+    if [[ "$unit_managed" == "1" ]] && systemctl list-unit-files caddy.service >/dev/null 2>&1; then
         log "Stopping and disabling caddy.service..."
         systemctl stop caddy 2>/dev/null || true
         systemctl disable caddy >/dev/null 2>&1 || true
+    elif systemctl list-unit-files caddy.service >/dev/null 2>&1; then
+        warn "Preserving caddy.service because it is not marked as managed by naivecd."
     fi
 
-    log "Removing Caddy service, binary, and generated configs..."
-    rm -f "$SYSTEMD_UNIT"
-    rm -f "$CADDY_BIN"
-    rm -rf "$CADDY_DIR"
-    rm -f "$CLIENT_CONFIG" "$SINGBOX_CONFIG"
-    systemctl daemon-reload
-    systemctl reset-failed caddy.service >/dev/null 2>&1 || true
+    log "Removing managed files..."
+    [[ "$unit_managed" == "1" ]] && remove_managed_file "$SYSTEMD_UNIT"
+    [[ "$MANAGED_CADDY_BIN" == "1" ]] && remove_managed_file "$CADDY_BIN"
+    [[ "$caddyfile_managed" == "1" ]] && remove_managed_file "$CADDYFILE"
+    [[ "$cred_managed" == "1" ]] && remove_managed_file "$CRED_FILE"
+    [[ "$MANAGED_CLIENT_CONFIG" == "1" ]] && remove_managed_file "$CLIENT_CONFIG"
+    [[ "$MANAGED_SINGBOX_CONFIG" == "1" ]] && remove_managed_file "$SINGBOX_CONFIG"
 
-if [[ -d "$static_root_to_remove" ]]; then
-        rm -rf "$static_root_to_remove"
-        ok "Removed ${static_root_to_remove}"
+    if [[ "$MANAGED_STATIC_INDEX" == "1" && -n "$static_root_to_review" ]]; then
+        local static_index="${static_root_to_review}/index.html"
+        if [[ -f "$static_index" ]]; then
+            if [[ -n "$STATE_STATIC_INDEX_SHA256" && "$(file_sha256 "$static_index")" == "$STATE_STATIC_INDEX_SHA256" ]]; then
+                remove_managed_file "$static_index"
+            else
+                warn "Preserving ${static_index}; it has been modified or lacks a managed checksum."
+            fi
+        fi
     fi
 
-    if [[ "$go_managed" == "yes" && -d "${GO_INSTALL_DIR}" ]]; then
-        rm -rf "${GO_INSTALL_DIR}"
-        ok "Removed ${GO_INSTALL_DIR}"
+    if [[ "$MANAGED_STATIC_ROOT_CREATED" == "1" && -n "$static_root_to_review" && -d "$static_root_to_review" ]]; then
+        if rmdir "$static_root_to_review" 2>/dev/null; then
+            ok "Removed empty managed static root ${static_root_to_review}"
+        else
+            warn "Preserving ${static_root_to_review}; it is not empty."
+        fi
+    fi
+
+    remove_managed_file "$STATE_FILE"
+
+    if [[ "$MANAGED_CADDY_DIR_CREATED" == "1" && -d "$CADDY_DIR" ]]; then
+        if rmdir "$CADDY_DIR" 2>/dev/null; then
+            ok "Removed empty managed Caddy config directory ${CADDY_DIR}"
+        else
+            warn "Preserving ${CADDY_DIR}; it is not empty."
+        fi
+    fi
+
+    if [[ "$unit_managed" == "1" ]]; then
+        systemctl daemon-reload
+        systemctl reset-failed caddy.service >/dev/null 2>&1 || true
+    fi
+
+    if [[ "$MANAGED_GO" == "1" && -d "${GO_INSTALL_DIR}" ]]; then
+        warn "Preserving managed Go toolchain at ${GO_INSTALL_DIR}; remove it manually if it is no longer needed."
     fi
 
     ok "Uninstall complete."
 }
 
 handle_existing_caddy() {
-    # Returns mode via stdout: "rebuild" | "reconfigure" | "reuse" | "uninstall" | "fresh"
+    # Returns mode via stdout: "rebuild" | "reconfigure" | "show" | "uninstall" | "fresh"
     if [[ ! -x "$CADDY_BIN" ]] && ! systemctl list-unit-files caddy.service >/dev/null 2>&1; then
         echo "fresh"
         return 0
@@ -255,26 +458,26 @@ handle_existing_caddy() {
         warn "Existing caddy.service detected (service: ${service_status})." >&2
     fi
 
-    local has_caddyfile=0
-    [[ -s "$CADDYFILE" ]] && has_caddyfile=1
+    local has_saved_config=0
+    [[ -s "$CRED_FILE" || -s "$CLIENT_CONFIG" || -s "$SINGBOX_CONFIG" ]] && has_saved_config=1
 
     echo "" >&2
     echo "Choose action:" >&2
     echo "  1) Reinstall NaiveProxy" >&2
     echo "  2) Reconfigure" >&2
-    if [[ "$has_caddyfile" -eq 1 ]]; then
+    if [[ "$has_saved_config" -eq 1 ]]; then
         echo "  3) Show client config" >&2
         echo "  4) Uninstall" >&2
         echo "  5) Exit" >&2
     else
         echo "  3) Uninstall" >&2
         echo "  4) Exit" >&2
-        echo "     (Show client config is unavailable: ${CADDYFILE} missing or empty)" >&2
+        echo "     (Show client config is unavailable: no saved config files were found)" >&2
     fi
     echo "" >&2
 
     local choice prompt
-    if [[ "$has_caddyfile" -eq 1 ]]; then
+    if [[ "$has_saved_config" -eq 1 ]]; then
         prompt="Enter choice [1-5]: "
     else
         prompt="Enter choice [1-4]: "
@@ -286,8 +489,8 @@ handle_existing_caddy() {
             1) echo "rebuild";     return 0 ;;
             2) echo "reconfigure"; return 0 ;;
             3)
-                if [[ "$has_caddyfile" -eq 1 ]]; then
-                    echo "reuse"
+                if [[ "$has_saved_config" -eq 1 ]]; then
+                    echo "show"
                     return 0
                 else
                     echo "uninstall"
@@ -295,7 +498,7 @@ handle_existing_caddy() {
                 fi
                 ;;
             4)
-                if [[ "$has_caddyfile" -eq 1 ]]; then
+                if [[ "$has_saved_config" -eq 1 ]]; then
                     echo "uninstall"
                     return 0
                 else
@@ -303,7 +506,7 @@ handle_existing_caddy() {
                 fi
                 ;;
             5)
-                if [[ "$has_caddyfile" -eq 1 ]]; then
+                if [[ "$has_saved_config" -eq 1 ]]; then
                     die "Exited by user choice."
                 else
                     echo "Invalid choice." >&2
@@ -312,34 +515,6 @@ handle_existing_caddy() {
             *) echo "Invalid choice." >&2 ;;
         esac
     done
-}
-
-parse_existing_caddyfile() {
-    # Populates DOMAIN, COVER_MODE, MASK_SITE/STATIC_ROOT, NAIVE_USER, NAIVE_PASS
-    # from the existing Caddyfile. Expects a format this script writes.
-    local f="$CADDYFILE"
-    [[ -s "$f" ]] || die "Cannot reuse: ${f} missing or empty"
-
-    DOMAIN="$(awk '/^:443,/ {sub(/^:443,[[:space:]]*/, ""); sub(/[[:space:]]*$/, ""); print; exit}' "$f")"
-    MASK_SITE="$(awk '/^[[:space:]]*reverse_proxy[[:space:]]/ {print $2; exit}' "$f")"
-    STATIC_ROOT="$(awk '/^[[:space:]]*root[[:space:]]+\*[[:space:]]/ {print $3; exit}' "$f")"
-
-    if [[ -n "$MASK_SITE" ]]; then
-        COVER_MODE="proxy"
-    elif [[ -n "$STATIC_ROOT" ]]; then
-        COVER_MODE="static"
-    else
-        die "Failed to parse cover mode from ${f} (expected 'reverse_proxy <url>' or 'root * <path>')"
-    fi
-
-    local creds_line
-    creds_line="$(awk '/^[[:space:]]*basic_auth[[:space:]]/ {print $2, $3; exit}' "$f")"
-    NAIVE_USER="${creds_line%% *}"
-    NAIVE_PASS="${creds_line##* }"
-
-    [[ -n "$DOMAIN"     ]] || die "Failed to parse domain from ${f} (expected ':443, <domain>' line)"
-    [[ -n "$NAIVE_USER" && -n "$NAIVE_PASS" && "$NAIVE_USER" != "$NAIVE_PASS" ]] \
-        || die "Failed to parse credentials from ${f} (expected 'basic_auth <user> <pass>' line)"
 }
 
 #─────────────────────────────────────────────────────────────────────────────
@@ -455,6 +630,42 @@ install_dependencies() {
     ok "apt dependencies installed"
 }
 
+ensure_caddy_account() {
+    log "Preparing dedicated Caddy runtime account..."
+    if ! getent group "$CADDY_GROUP" >/dev/null 2>&1; then
+        groupadd --system "$CADDY_GROUP"
+        MANAGED_CADDY_GROUP_CREATED=1
+        ok "Created system group: ${CADDY_GROUP}"
+    else
+        ok "System group exists: ${CADDY_GROUP}"
+    fi
+
+    if ! id -u "$CADDY_USER" >/dev/null 2>&1; then
+        local nologin="/usr/sbin/nologin"
+        [[ -x /sbin/nologin ]] && nologin="/sbin/nologin"
+        useradd --system \
+            --gid "$CADDY_GROUP" \
+            --home-dir "$CADDY_STATE_DIR" \
+            --shell "$nologin" \
+            --comment "Caddy web server" \
+            "$CADDY_USER"
+        MANAGED_CADDY_USER_CREATED=1
+        ok "Created system user: ${CADDY_USER}"
+    else
+        if ! id -nG "$CADDY_USER" | tr ' ' '\n' | grep -Fxq "$CADDY_GROUP"; then
+            usermod -a -G "$CADDY_GROUP" "$CADDY_USER"
+            ok "Added ${CADDY_USER} to group ${CADDY_GROUP}"
+        else
+            ok "System user exists: ${CADDY_USER}"
+        fi
+    fi
+
+    mkdir -p "$CADDY_STATE_DIR"
+    chown "$CADDY_USER:$CADDY_GROUP" "$CADDY_STATE_DIR"
+    chmod 0750 "$CADDY_STATE_DIR"
+    ok "Caddy state directory ready: ${CADDY_STATE_DIR}"
+}
+
 install_go() {
     local latest tarball url
     log "Resolving latest stable Go version..."
@@ -466,10 +677,15 @@ install_go() {
         current="$("${GO_INSTALL_DIR}/bin/go" version | awk '{print $3}')"
         if [[ "$current" == "$latest" ]]; then
             ok "Go ${latest} already installed"
-            export PATH="${GO_INSTALL_DIR}/bin:$PATH"
-            return 0
+        else
+            warn "Using existing Go ${current}; the installer will not replace ${GO_INSTALL_DIR} automatically."
         fi
-        log "Replacing existing Go ${current} with ${latest}"
+        export PATH="${GO_INSTALL_DIR}/bin:$PATH"
+        return 0
+    fi
+
+    if [[ -d "$GO_INSTALL_DIR" ]]; then
+        die "${GO_INSTALL_DIR} exists but ${GO_INSTALL_DIR}/bin/go is not executable. Repair or remove it manually before source build."
     fi
 
     tarball="${latest}.linux-${ARCH}.tar.gz"
@@ -477,11 +693,11 @@ install_go() {
     log "Downloading $url"
     wget -q --show-progress -O "/tmp/${tarball}" "$url"
 
-    rm -rf "${GO_INSTALL_DIR}"
     tar -C /usr/local -xzf "/tmp/${tarball}"
     rm -f "/tmp/${tarball}"
 
     export PATH="${GO_INSTALL_DIR}/bin:$PATH"
+    MANAGED_GO=1
     ok "Installed $(go version)"
 }
 
@@ -574,8 +790,10 @@ install_caddy_binary() {
         log "Stopping running caddy.service before binary swap..."
         systemctl stop caddy
     fi
+    backup_path "$CADDY_BIN" "before Caddy binary replacement"
     install -m 0755 "$BUILT_CADDY_BIN" "$CADDY_BIN"
     rm -f "$BUILT_CADDY_BIN"
+    MANAGED_CADDY_BIN=1
     ok "Installed: $($CADDY_BIN version | head -n1)"
 }
 
@@ -591,7 +809,23 @@ generate_credentials() {
 write_static_cover_site() {
     [[ "$COVER_MODE" == "static" ]] || return 0
     log "Preparing local static cover site at ${STATIC_ROOT}..."
+    if [[ -n "$STATE_STATIC_ROOT" && "$STATE_STATIC_ROOT" != "$STATIC_ROOT" ]]; then
+        MANAGED_STATIC_ROOT_CREATED=0
+        MANAGED_STATIC_INDEX=0
+        STATE_STATIC_INDEX_SHA256=""
+    fi
+    if [[ ! -d "$STATIC_ROOT" ]]; then
+        MANAGED_STATIC_ROOT_CREATED=1
+    fi
     mkdir -p "$STATIC_ROOT"
+    # Caddy now runs as the dedicated caddy user. Grant group traversal on the
+    # selected static root so an existing root-owned cover directory remains
+    # serviceable without making Caddy run as root again.
+    chgrp "$CADDY_GROUP" "$STATIC_ROOT"
+    chmod g+rx "$STATIC_ROOT"
+    if [[ "$MANAGED_STATIC_ROOT_CREATED" == "1" ]]; then
+        chmod 0755 "$STATIC_ROOT"
+    fi
     if [[ ! -e "${STATIC_ROOT}/index.html" ]]; then
         cat > "${STATIC_ROOT}/index.html" <<EOF
 <!doctype html>
@@ -616,16 +850,32 @@ write_static_cover_site() {
 </html>
 EOF
         chmod 0644 "${STATIC_ROOT}/index.html"
+        chgrp "$CADDY_GROUP" "${STATIC_ROOT}/index.html"
+        MANAGED_STATIC_INDEX=1
+        STATE_STATIC_ROOT="$STATIC_ROOT"
+        STATE_STATIC_INDEX_SHA256="$(file_sha256 "${STATIC_ROOT}/index.html")"
         ok "Default index.html written"
     else
+        if [[ -f "${STATIC_ROOT}/index.html" ]]; then
+            chgrp "$CADDY_GROUP" "${STATIC_ROOT}/index.html"
+            chmod g+r "${STATIC_ROOT}/index.html"
+        fi
+        STATE_STATIC_ROOT="$STATIC_ROOT"
         ok "Existing index.html preserved"
     fi
 }
 
 write_caddyfile() {
     log "Writing ${CADDYFILE}..."
+    if [[ ! -d "$CADDY_DIR" ]]; then
+        MANAGED_CADDY_DIR_CREATED=1
+    fi
     mkdir -p "$CADDY_DIR"
+    chgrp "$CADDY_GROUP" "$CADDY_DIR"
+    chmod u+rwx,g+rx "$CADDY_DIR"
+    backup_path "$CADDYFILE" "before Caddyfile replacement"
     cat > "$CADDYFILE" <<EOF
+# Managed by naivecd. The installer may replace this file during reconfiguration.
 :443, ${DOMAIN}
 tls naive@${DOMAIN}
 
@@ -654,36 +904,53 @@ EOF
     cat >> "$CADDYFILE" <<EOF
 }
 EOF
-    chmod 600 "$CADDYFILE"
+    chown "root:$CADDY_GROUP" "$CADDYFILE"
+    chmod 0640 "$CADDYFILE"
+    MANAGED_CADDYFILE=1
     ok "Caddyfile written"
 }
 
 
 write_systemd_unit() {
     log "Writing ${SYSTEMD_UNIT}..."
+    backup_path "$SYSTEMD_UNIT" "before systemd unit replacement"
     cat > "$SYSTEMD_UNIT" <<'EOF'
 [Unit]
 Description=Caddy with NaiveProxy
+# Managed by naivecd. The installer may replace this unit during reconfiguration.
 After=network.target network-online.target
 Requires=network-online.target
 
 [Service]
 Type=notify
-User=root
-Group=root
-ExecStart=/usr/bin/caddy run --config /etc/caddy/Caddyfile
-ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile
+User=caddy
+Group=caddy
+Environment=XDG_CONFIG_HOME=/var/lib/caddy
+Environment=XDG_DATA_HOME=/var/lib/caddy
+ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
 TimeoutStopSec=5s
 LimitNOFILE=1048576
 LimitNPROC=512
 PrivateTmp=true
-ProtectSystem=full
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/caddy
+StateDirectory=caddy
+RuntimeDirectory=caddy
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
 Restart=always
 RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target
 EOF
+    chown root:root "$SYSTEMD_UNIT"
+    chmod 0644 "$SYSTEMD_UNIT"
+    MANAGED_SYSTEMD_UNIT=1
     systemctl daemon-reload
     ok "systemd unit written"
 }
@@ -729,7 +996,9 @@ wait_for_caddy_active() {
 #─────────────────────────────────────────────────────────────────────────────
 
 save_credentials_file() {
+    backup_path "$CRED_FILE" "before credentials replacement"
     cat > "$CRED_FILE" <<EOF
+# Managed by naivecd. This file contains generated NaiveProxy credentials.
 # NaiveProxy credentials — generated $(date -Iseconds)
 # Domain:     ${DOMAIN}
 # Cover mode: ${COVER_MODE}
@@ -744,20 +1013,26 @@ NAIVE_USER='${NAIVE_USER}'
 NAIVE_PASS='${NAIVE_PASS}'
 NAIVE_URL='naive+https://${NAIVE_USER}:${NAIVE_PASS}@${DOMAIN}:443?padding=1#NaiveProxy'
 EOF
+    chown root:root "$CRED_FILE"
     chmod 600 "$CRED_FILE"
+    MANAGED_CRED_FILE=1
 }
 
 write_client_config() {
+    backup_path "$CLIENT_CONFIG" "before client config replacement"
     cat > "$CLIENT_CONFIG" <<EOF
 {
   "listen": "socks://127.0.0.1:10808",
   "proxy": "https://${NAIVE_USER}:${NAIVE_PASS}@${DOMAIN}"
 }
 EOF
+    chown root:root "$CLIENT_CONFIG"
     chmod 600 "$CLIENT_CONFIG"
+    MANAGED_CLIENT_CONFIG=1
 }
 
 write_singbox_config() {
+    backup_path "$SINGBOX_CONFIG" "before sing-box config replacement"
     cat > "$SINGBOX_CONFIG" <<EOF
 {
   "outbounds": [
@@ -780,7 +1055,52 @@ write_singbox_config() {
   ]
 }
 EOF
+    chown root:root "$SINGBOX_CONFIG"
     chmod 600 "$SINGBOX_CONFIG"
+    MANAGED_SINGBOX_CONFIG=1
+}
+
+show_existing_client_config() {
+    local found=0
+
+    echo
+    printf '%s════════════════════════════════════════════════════════════════════%s\n' "$C_BOLD" "$C_RST"
+    printf '%s  Saved NaiveProxy client configuration%s\n' "$C_BOLD" "$C_RST"
+    printf '%s════════════════════════════════════════════════════════════════════%s\n' "$C_BOLD" "$C_RST"
+    echo
+
+    if [[ -r "$CRED_FILE" ]]; then
+        printf '%sCredentials%s (%s):\n' "$C_BOLD" "$C_RST" "$CRED_FILE"
+        sed 's/^/    /' "$CRED_FILE"
+        echo
+        found=1
+    else
+        warn "Credentials file not found: ${CRED_FILE}"
+    fi
+
+    if [[ -r "$CLIENT_CONFIG" ]]; then
+        printf '%sNaive CLI config%s (%s):\n' "$C_BOLD" "$C_RST" "$CLIENT_CONFIG"
+        sed 's/^/    /' "$CLIENT_CONFIG"
+        echo
+        found=1
+    else
+        warn "Naive CLI config not found: ${CLIENT_CONFIG}"
+    fi
+
+    if [[ -r "$SINGBOX_CONFIG" ]]; then
+        printf '%ssing-box config%s (%s):\n' "$C_BOLD" "$C_RST" "$SINGBOX_CONFIG"
+        sed 's/^/    /' "$SINGBOX_CONFIG"
+        echo
+        found=1
+    else
+        warn "sing-box config not found: ${SINGBOX_CONFIG}"
+    fi
+
+    if (( found == 0 )); then
+        warn "No saved client configuration or credentials were found."
+    else
+        ok "Read-only display complete. No files, services, ports, or credentials were changed."
+    fi
 }
 
 print_summary() {
@@ -860,40 +1180,34 @@ main() {
     fi
     log "Install mode: $MODE"
 
+    if [[ "$MODE" == "show" ]]; then
+        show_existing_client_config
+        exit 0
+    fi
+
     if [[ "$MODE" == "uninstall" ]]; then
         uninstall_caddy_naive
         exit 0
     fi
 
+    load_managed_state
     install_dependencies
 
-    if [[ "$MODE" == "reuse" ]]; then
-        parse_existing_caddyfile
-        log "Reusing existing Caddyfile:"
-        log "Domain      : $DOMAIN"
-        log "Cover mode  : $COVER_MODE"
-        if [[ "$COVER_MODE" == "static" ]]; then
-            log "Static root : $STATIC_ROOT"
-        else
-            log "Cover site  : $MASK_SITE"
-        fi
-        log "User/pass   : preserved from existing config"
+    gather_inputs
+    echo
+    log "NaiveProxy setup summary:"
+    log "Domain      : $DOMAIN"
+    log "Cover mode  : $COVER_MODE"
+    if [[ "$COVER_MODE" == "static" ]]; then
+        log "Static root : $STATIC_ROOT"
     else
-        gather_inputs
-        echo
-        log "NaiveProxy setup summary:"
-        log "Domain      : $DOMAIN"
-        log "Cover mode  : $COVER_MODE"
-        if [[ "$COVER_MODE" == "static" ]]; then
-            log "Static root : $STATIC_ROOT"
-        else
-            log "Cover site  : $MASK_SITE"
-        fi
-        echo
-        confirm "Proceed" default-yes || die "Aborted by user."
-        check_dns "$DOMAIN"
+        log "Cover site  : $MASK_SITE"
     fi
+    echo
+    confirm "Proceed" default-yes || die "Aborted by user."
+    check_dns "$DOMAIN"
 
+    ensure_caddy_account
     check_ports
 
     if [[ "$MODE" == "rebuild" || "$MODE" == "fresh" ]]; then
@@ -901,19 +1215,19 @@ main() {
         install_caddy_binary
     fi
 
-    if [[ "$MODE" != "reuse" ]]; then
-        generate_credentials
-        write_static_cover_site
-        write_caddyfile
-    fi
+    generate_credentials
+    write_static_cover_site
+    write_caddyfile
 
     write_systemd_unit
+    write_managed_state
     start_caddy
     wait_for_caddy_active
 
     save_credentials_file
     write_client_config
     write_singbox_config
+    write_managed_state
     print_summary
 }
 

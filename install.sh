@@ -707,6 +707,20 @@ verify_caddy_forwardproxy() {
     "$bin" list-modules 2>/dev/null | grep -Fxq 'http.handlers.forward_proxy'
 }
 
+require_installed_caddy_forwardproxy() {
+    local action="$1"
+    local advice="$2"
+
+    [[ -e "$CADDY_BIN" ]] \
+        || die "${CADDY_BIN} is missing; cannot ${action}. ${advice}"
+    [[ -x "$CADDY_BIN" && ! -d "$CADDY_BIN" ]] \
+        || die "${CADDY_BIN} is not executable; cannot ${action}. ${advice}"
+    verify_caddy_forwardproxy "$CADDY_BIN" \
+        || die "${CADDY_BIN} is missing required module http.handlers.forward_proxy; cannot ${action}. ${advice}"
+
+    ok "Verified Caddy forward_proxy module in ${CADDY_BIN}"
+}
+
 download_prebuilt_caddy() {
     if [[ "${NAIVE_CADDY_INSTALL:-auto}" == "build" ]]; then
         log "Source build forced by NAIVE_CADDY_INSTALL=build"
@@ -792,6 +806,9 @@ install_caddy_binary() {
     fi
     backup_path "$CADDY_BIN" "before Caddy binary replacement"
     install -m 0755 "$BUILT_CADDY_BIN" "$CADDY_BIN"
+    require_installed_caddy_forwardproxy \
+        "continue after installing Caddy" \
+        "Retry reinstall/source build with a Naive-capable Caddy."
     rm -f "$BUILT_CADDY_BIN"
     MANAGED_CADDY_BIN=1
     ok "Installed: $($CADDY_BIN version | head -n1)"
@@ -1188,6 +1205,12 @@ main() {
     if [[ "$MODE" == "uninstall" ]]; then
         uninstall_caddy_naive
         exit 0
+    fi
+
+    if [[ "$MODE" == "reconfigure" ]]; then
+        require_installed_caddy_forwardproxy \
+            "reconfigure" \
+            "Choose Reinstall NaiveProxy, or rerun with NAIVE_CADDY_INSTALL=build to source-build a Naive-capable Caddy."
     fi
 
     load_managed_state

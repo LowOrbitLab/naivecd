@@ -4,7 +4,8 @@ One-command NaiveProxy + Caddy installer for Debian/Ubuntu VPS.
 
 ## Features
 
-- Downloads prebuilt Caddy with `klzgrad/forwardproxy@naive` on amd64, with source-build fallback
+- Downloads pinned prebuilt Caddy `klzgrad/forwardproxy` release `v2.11.2-naive` on amd64, with SHA256 verification before extraction
+- Uses pinned source-build inputs when a build is required: Caddy `v2.11.2`, verified `go1.26.4` when Go is not already installed, `xcaddy@v0.4.6`, and `github.com/klzgrad/forwardproxy@v2.11.2-naive`
 - Supports local static cover site or reverse-proxy cover site
 - Automatically obtains a Let's Encrypt TLS certificate
 - Generates NaiveProxy credentials, URI, QR code, CLI config, and sing-box outbound JSON
@@ -21,11 +22,38 @@ One-command NaiveProxy + Caddy installer for Debian/Ubuntu VPS.
 
 ## Install
 
+Convenience install:
+
 ```bash
 wget -qO- https://raw.githubusercontent.com/LowOrbitLab/naivecd/main/install.sh | sudo bash
 ```
 
+The pipe-to-shell form is provided for convenience. For higher operational assurance, download `install.sh`, review it, and then run it with root privileges.
+
 The installer asks for confirmation before making changes.
+
+## Supply-Chain Pins
+
+The default amd64 prebuilt path downloads:
+
+```text
+https://github.com/klzgrad/forwardproxy/releases/download/v2.11.2-naive/caddy-forwardproxy-naive.tar.xz
+```
+
+The archive is verified before extraction and before any extracted Caddy binary is executed:
+
+```text
+19eccb7321dd877a5fb4a3dba6ef1b745185188b616c96cc6201f1a1fc0380a8
+```
+
+When source build is required, the installer uses an existing Go installation from `/usr/local/go` or `PATH` and logs its version. If Go must be installed, it downloads `go1.26.4` into a temporary directory and verifies the platform tarball before extraction:
+
+| Artifact | SHA256 |
+|---|---|
+| `go1.26.4.linux-amd64.tar.gz` | `1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f` |
+| `go1.26.4.linux-arm64.tar.gz` | `ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768` |
+
+Source builds install `github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.6` and build Caddy `v2.11.2` with `github.com/klzgrad/forwardproxy@v2.11.2-naive`.
 
 ## Cover Modes
 
@@ -129,5 +157,5 @@ It preserves unmarked Caddy files, existing `/etc/caddy` contents, modified or p
 ## Sources
 
 - <https://github.com/klzgrad/naiveproxy>
-- <https://github.com/klzgrad/forwardproxy/tree/naive>
+- <https://github.com/klzgrad/forwardproxy/tree/v2.11.2-naive>
 - <https://caddyserver.com/>

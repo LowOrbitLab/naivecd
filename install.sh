@@ -73,7 +73,15 @@ require_cmd() {
 
 readonly DEFAULT_MASK_SITE="https://www.lovense.com"
 readonly DEFAULT_STATIC_ROOT="/var/www/naive-cover"
-readonly PREBUILT_CADDY_URL="https://github.com/klzgrad/forwardproxy/releases/latest/download/caddy-forwardproxy-naive.tar.xz"
+readonly PREBUILT_CADDY_TAG="v2.11.2-naive"
+readonly PREBUILT_CADDY_URL="https://github.com/klzgrad/forwardproxy/releases/download/${PREBUILT_CADDY_TAG}/caddy-forwardproxy-naive.tar.xz"
+readonly PREBUILT_CADDY_SHA256="19eccb7321dd877a5fb4a3dba6ef1b745185188b616c96cc6201f1a1fc0380a8"
+readonly CADDY_CORE_VERSION="v2.11.2"
+readonly GO_VERSION="go1.26.4"
+readonly GO_LINUX_AMD64_SHA256="1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f"
+readonly GO_LINUX_ARM64_SHA256="ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768"
+readonly XCADDY_MODULE="github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.6"
+readonly FORWARDPROXY_MODULE="github.com/klzgrad/forwardproxy@v2.11.2-naive"
 readonly CADDY_BIN="/usr/bin/caddy"
 readonly CADDY_DIR="/etc/caddy"
 readonly CADDYFILE="${CADDY_DIR}/Caddyfile"
@@ -269,6 +277,20 @@ write_managed_state() {
 
 file_sha256() {
     sha256sum "$1" | awk '{print $1}'
+}
+
+verify_sha256() {
+    local file="$1" expected="$2" label="${3:-$1}"
+    require_cmd sha256sum
+    [[ -f "$file" ]] || die "Cannot verify SHA256; file not found: ${file}"
+
+    if printf '%s  %s\n' "$expected" "$file" | sha256sum -c --strict --status -; then
+        ok "Verified SHA256 for ${label}"
+        return 0
+    fi
+
+    err "SHA256 verification failed for ${label}"
+    return 1
 }
 
 ensure_backup_dir() {
@@ -667,18 +689,13 @@ ensure_caddy_account() {
 }
 
 install_go() {
-    local latest tarball url
-    log "Resolving latest stable Go version..."
-    latest="$(curl -fsS --max-time 10 https://go.dev/VERSION?m=text | head -n1)"
-    [[ "$latest" =~ ^go[0-9] ]] || die "Could not resolve latest Go version (got: '$latest')"
-
     if [[ -x "${GO_INSTALL_DIR}/bin/go" ]]; then
         local current
-        current="$("${GO_INSTALL_DIR}/bin/go" version | awk '{print $3}')"
-        if [[ "$current" == "$latest" ]]; then
-            ok "Go ${latest} already installed"
+        current="$("${GO_INSTALL_DIR}/bin/go" version)"
+        if [[ "$current" == *" ${GO_VERSION} "* ]]; then
+            ok "Using existing Go installation: ${current}"
         else
-            warn "Using existing Go ${current}; the installer will not replace ${GO_INSTALL_DIR} automatically."
+            warn "Using existing Go installation: ${current}; the installer will not replace ${GO_INSTALL_DIR} automatically."
         fi
         export PATH="${GO_INSTALL_DIR}/bin:$PATH"
         return 0
@@ -688,13 +705,43 @@ install_go() {
         die "${GO_INSTALL_DIR} exists but ${GO_INSTALL_DIR}/bin/go is not executable. Repair or remove it manually before source build."
     fi
 
-    tarball="${latest}.linux-${ARCH}.tar.gz"
+    local go_bin
+    if go_bin="$(type -P go)" && [[ -n "$go_bin" ]]; then
+        local current
+        current="$(go version)"
+        if [[ "$current" == *" ${GO_VERSION} "* ]]; then
+            ok "Using existing Go installation from ${go_bin}: ${current}"
+        else
+            warn "Using existing Go installation from ${go_bin}: ${current}; the installer will not install pinned ${GO_VERSION} automatically."
+        fi
+        return 0
+    fi
+
+    local checksum download_dir tarball tarball_path url
+    case "$ARCH" in
+        amd64) checksum="$GO_LINUX_AMD64_SHA256" ;;
+        arm64) checksum="$GO_LINUX_ARM64_SHA256" ;;
+        *) die "Unsupported Go architecture: ${ARCH}" ;;
+    esac
+
+    mkdir -p "$TMP_BUILD_DIR"
+    download_dir="$(mktemp -d -p "$TMP_BUILD_DIR" go-download.XXXXXX)"
+    tarball="${GO_VERSION}.linux-${ARCH}.tar.gz"
+    tarball_path="${download_dir}/${tarball}"
     url="https://go.dev/dl/${tarball}"
     log "Downloading $url"
-    wget -q --show-progress -O "/tmp/${tarball}" "$url"
+    if ! wget -q --show-progress -O "$tarball_path" "$url"; then
+        rm -rf "$download_dir"
+        die "Failed to download ${url}"
+    fi
 
-    tar -C /usr/local -xzf "/tmp/${tarball}"
-    rm -f "/tmp/${tarball}"
+    if ! verify_sha256 "$tarball_path" "$checksum" "Go ${GO_VERSION} ${ARCH} tarball"; then
+        rm -rf "$download_dir"
+        die "Refusing to extract Go tarball after checksum failure."
+    fi
+
+    tar -C /usr/local -xzf "$tarball_path"
+    rm -rf "$download_dir"
 
     export PATH="${GO_INSTALL_DIR}/bin:$PATH"
     MANAGED_GO=1
@@ -732,7 +779,7 @@ download_prebuilt_caddy() {
         return 1
     fi
 
-    log "Downloading prebuilt Caddy with NaiveProxy support..."
+    log "Downloading prebuilt Caddy ${PREBUILT_CADDY_TAG} with NaiveProxy support..."
     local download_dir archive extracted_bin
     mkdir -p "$TMP_BUILD_DIR"
     download_dir="$(mktemp -d -p "$TMP_BUILD_DIR" caddy-prebuilt.XXXXXX)"
@@ -742,6 +789,11 @@ download_prebuilt_caddy() {
         warn "Prebuilt Caddy download failed; falling back to source build."
         rm -rf "$download_dir"
         return 1
+    fi
+
+    if ! verify_sha256 "$archive" "$PREBUILT_CADDY_SHA256" "prebuilt Caddy archive"; then
+        rm -rf "$download_dir"
+        die "Refusing to extract prebuilt Caddy archive after checksum failure."
     fi
 
     if ! tar -C "$download_dir" -xJf "$archive"; then
@@ -771,15 +823,15 @@ build_caddy() {
     export GOPATH="${GOPATH:-/root/go}"
     export PATH="${GOPATH}/bin:${GO_INSTALL_DIR}/bin:$PATH"
 
-    log "Installing xcaddy..."
-    go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+    log "Installing ${XCADDY_MODULE}..."
+    go install "$XCADDY_MODULE"
 
-    log "Building Caddy with klzgrad/forwardproxy@naive (this takes a few minutes)..."
+    log "Building Caddy ${CADDY_CORE_VERSION} with ${FORWARDPROXY_MODULE} (this takes a few minutes)..."
     local build_dir
     build_dir="$(mktemp -d -p "$TMP_BUILD_DIR" caddy-build.XXXXXX)"
     pushd "$build_dir" >/dev/null
-    "${GOPATH}/bin/xcaddy" build \
-        --with github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@naive
+    "${GOPATH}/bin/xcaddy" build "$CADDY_CORE_VERSION" \
+        --with "github.com/caddyserver/forwardproxy=${FORWARDPROXY_MODULE}"
     [[ -x ./caddy ]] || die "xcaddy build failed: ./caddy not produced"
     verify_caddy_forwardproxy ./caddy || die "built Caddy is missing http.handlers.forward_proxy"
     BUILT_CADDY_BIN="${TMP_BUILD_DIR}/caddy.new"

@@ -1266,7 +1266,6 @@ main() {
     fi
 
     load_managed_state
-    install_dependencies
 
     gather_inputs
     echo
@@ -1280,6 +1279,8 @@ main() {
     fi
     echo
     confirm "Proceed" default-yes || die "Aborted by user."
+
+    install_dependencies
     check_dns "$DOMAIN"
 
     ensure_caddy_account

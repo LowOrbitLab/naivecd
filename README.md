@@ -81,13 +81,16 @@ https://www.lovense.com
 
 ## Non-interactive Examples
 
+Set `NAIVE_ASSUME_YES=1` to accept the normal fresh-install confirmation prompts when all required inputs are provided through environment variables. Safety confirmations for DNS mismatches, occupied ports, uninstall actions, and existing-install menus remain interactive.
+
 Set `NAIVE_CADDY_INSTALL=build` to force local `xcaddy` source build instead of the default prebuilt amd64 binary.
 
 Static cover:
 
 ```bash
 wget -qO- https://raw.githubusercontent.com/LowOrbitLab/naivecd/main/install.sh | \
-  sudo NAIVE_DOMAIN=proxy.example.com \
+  sudo NAIVE_ASSUME_YES=1 \
+       NAIVE_DOMAIN=proxy.example.com \
        NAIVE_COVER_MODE=static \
        NAIVE_STATIC_ROOT=/var/www/naive-cover \
        bash
@@ -97,7 +100,8 @@ Reverse-proxy cover:
 
 ```bash
 wget -qO- https://raw.githubusercontent.com/LowOrbitLab/naivecd/main/install.sh | \
-  sudo NAIVE_DOMAIN=proxy.example.com \
+  sudo NAIVE_ASSUME_YES=1 \
+       NAIVE_DOMAIN=proxy.example.com \
        NAIVE_COVER_MODE=proxy \
        NAIVE_MASK_SITE=https://www.lovense.com \
        bash

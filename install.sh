@@ -114,6 +114,7 @@ MANAGED_CADDY_GROUP_CREATED=0
 STATE_STATIC_ROOT=""
 STATE_STATIC_INDEX_SHA256=""
 BACKUP_SESSION_DIR=""
+BACKUP_QUIET=0
 
 #─────────────────────────────────────────────────────────────────────────────
 # Preflight
@@ -310,7 +311,9 @@ backup_path() {
     dest="${BACKUP_SESSION_DIR}/${rel}"
     mkdir -p "$(dirname "$dest")"
     cp -a -- "$path" "$dest"
-    ok "Backed up ${path} (${reason}) to ${dest}"
+    if [[ "$BACKUP_QUIET" != "1" ]]; then
+        ok "Backed up ${path} (${reason}) to ${dest}"
+    fi
 }
 
 file_has_naivecd_marker() {
@@ -352,45 +355,62 @@ uninstall_caddy_naive() {
     local any=0
     warn "This will remove only managed resources:" >&2
     if [[ "$unit_managed" == "1" && -e "$SYSTEMD_UNIT" ]]; then
+        echo "  Service:" >&2
         echo "    - ${SYSTEMD_UNIT}" >&2
         any=1
     fi
     if [[ "$MANAGED_CADDY_BIN" == "1" && -e "$CADDY_BIN" ]]; then
+        echo "  Binary:" >&2
         echo "    - ${CADDY_BIN}" >&2
         any=1
     fi
-    if [[ "$caddyfile_managed" == "1" && -e "$CADDYFILE" ]]; then
-        echo "    - ${CADDYFILE}" >&2
-        any=1
+    if [[ "$caddyfile_managed" == "1" || "$cred_managed" == "1" || -e "$STATE_FILE" ]]; then
+        echo "  Config:" >&2
+        if [[ "$caddyfile_managed" == "1" && -e "$CADDYFILE" ]]; then
+            echo "    - ${CADDYFILE}" >&2
+            any=1
+        fi
+        if [[ "$cred_managed" == "1" && -e "$CRED_FILE" ]]; then
+            echo "    - ${CRED_FILE}" >&2
+            any=1
+        fi
+        if [[ -e "$STATE_FILE" ]]; then
+            echo "    - ${STATE_FILE}" >&2
+            any=1
+        fi
     fi
-    if [[ "$cred_managed" == "1" && -e "$CRED_FILE" ]]; then
-        echo "    - ${CRED_FILE}" >&2
-        any=1
+    if [[ "$MANAGED_CLIENT_CONFIG" == "1" || "$MANAGED_SINGBOX_CONFIG" == "1" ]]; then
+        echo "  Client configs:" >&2
+        if [[ "$MANAGED_CLIENT_CONFIG" == "1" && -e "$CLIENT_CONFIG" ]]; then
+            echo "    - ${CLIENT_CONFIG}" >&2
+            any=1
+        fi
+        if [[ "$MANAGED_SINGBOX_CONFIG" == "1" && -e "$SINGBOX_CONFIG" ]]; then
+            echo "    - ${SINGBOX_CONFIG}" >&2
+            any=1
+        fi
     fi
-    if [[ "$MANAGED_CLIENT_CONFIG" == "1" && -e "$CLIENT_CONFIG" ]]; then
-        echo "    - ${CLIENT_CONFIG}" >&2
-        any=1
-    fi
-    if [[ "$MANAGED_SINGBOX_CONFIG" == "1" && -e "$SINGBOX_CONFIG" ]]; then
-        echo "    - ${SINGBOX_CONFIG}" >&2
-        any=1
-    fi
-    if [[ "$MANAGED_STATIC_INDEX" == "1" && -n "$static_root_to_review" ]]; then
-        echo "    - ${static_root_to_review}/index.html, if unchanged from the installer placeholder" >&2
-        any=1
+    if [[ "$MANAGED_STATIC_INDEX" == "1" || "$MANAGED_STATIC_ROOT_CREATED" == "1" ]]; then
+        echo "  Static cover:" >&2
+        if [[ "$MANAGED_STATIC_INDEX" == "1" && -n "$static_root_to_review" ]]; then
+            echo "    - ${static_root_to_review}/index.html, if unchanged from the installer placeholder" >&2
+            any=1
+        fi
+        if [[ "$MANAGED_STATIC_ROOT_CREATED" == "1" && -n "$static_root_to_review" ]]; then
+            echo "    - ${static_root_to_review}/, only if empty after the managed placeholder is removed" >&2
+            any=1
+        fi
     fi
     if [[ "$MANAGED_CADDY_DIR_CREATED" == "1" ]]; then
+        echo "  Directories:" >&2
         echo "    - ${CADDY_DIR}/, only if empty after managed files are removed" >&2
-        any=1
-    fi
-    if [[ "$MANAGED_STATIC_ROOT_CREATED" == "1" && -n "$static_root_to_review" ]]; then
-        echo "    - ${static_root_to_review}/, only if empty after the managed placeholder is removed" >&2
         any=1
     fi
 
     echo >&2
     warn "Preserved by default:" >&2
-    echo "    - unmarked Caddy files, Caddy data/certificates, and user static site content" >&2
+    echo "    - unmarked Caddy files and custom/static site content" >&2
+    echo "    - Caddy TLS state and certificates under ${CADDY_STATE_DIR}" >&2
     echo "    - Go toolchains, DNS records, and firewall rules" >&2
     if (( any == 0 )); then
         echo >&2
@@ -401,6 +421,10 @@ uninstall_caddy_naive() {
     echo >&2
     confirm "Continue uninstall" default-no || die "Aborted by user."
 
+    BACKUP_QUIET=1
+    ensure_backup_dir
+    log "Backup directory: ${BACKUP_SESSION_DIR}"
+
     if [[ "$unit_managed" == "1" ]] && systemctl list-unit-files caddy.service >/dev/null 2>&1; then
         log "Stopping and disabling caddy.service..."
         systemctl stop caddy 2>/dev/null || true
@@ -409,7 +433,7 @@ uninstall_caddy_naive() {
         warn "Preserving caddy.service because it is not marked as managed by naivecd."
     fi
 
-    log "Removing managed files..."
+    log "Removing managed resources..."
     [[ "$unit_managed" == "1" ]] && remove_managed_file "$SYSTEMD_UNIT"
     [[ "$MANAGED_CADDY_BIN" == "1" ]] && remove_managed_file "$CADDY_BIN"
     [[ "$caddyfile_managed" == "1" ]] && remove_managed_file "$CADDYFILE"
@@ -456,6 +480,7 @@ uninstall_caddy_naive() {
     fi
 
     ok "Uninstall complete."
+    log "Backup saved to: ${BACKUP_SESSION_DIR}"
 }
 
 handle_existing_caddy() {

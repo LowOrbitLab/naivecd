@@ -29,12 +29,8 @@ on_err() {
 trap 'on_err $LINENO' ERR
 
 confirm() {
-    # confirm "Question" [default-yes|default-no] [allow-assume]
-    local prompt="$1" default="${2:-default-no}" assume_mode="${3:-}" reply
-    if [[ "$assume_mode" == "allow-assume" && "${NAIVE_ASSUME_YES:-0}" == "1" ]]; then
-        log "Auto-confirmed: ${prompt}"
-        return 0
-    fi
+    # confirm "Question" [default-yes|default-no]
+    local prompt="$1" default="${2:-default-no}" reply
     local hint="[y/N]"
     [[ "$default" == "default-yes" ]] && hint="[Y/n]"
     while true; do
@@ -585,20 +581,10 @@ validate_mask_site() {
 }
 
 validate_static_root() {
+    [[ "$STATIC_ROOT" == /var/www/* || "$STATIC_ROOT" == /srv/* ]] \
+        || die "Static site root must be under /var/www/ or /srv/: $STATIC_ROOT"
     [[ "$STATIC_ROOT" != *[[:space:]]* ]] \
         || die "Static site root must not contain whitespace: $STATIC_ROOT"
-
-    local normalized
-    normalized="$(realpath -m -- "$STATIC_ROOT")"
-    case "$normalized" in
-        /var/www/*|/srv/*) ;;
-        *) die "Static site root must resolve under /var/www/ or /srv/: $STATIC_ROOT -> $normalized" ;;
-    esac
-
-    [[ "$normalized" != "/var/www" && "$normalized" != "/srv" ]] \
-        || die "Static site root must be a subdirectory, not $normalized"
-
-    STATIC_ROOT="$normalized"
 }
 
 gather_inputs() {
@@ -1258,7 +1244,7 @@ main() {
         MODE="$(handle_existing_caddy)"
     else
         log "Install NaiveProxy with Caddy on this server."
-        confirm "Continue" default-no allow-assume || die "Aborted by user."
+        confirm "Continue" default-no || die "Aborted by user."
         MODE="fresh"
     fi
     log "Install mode: $MODE"
@@ -1280,6 +1266,7 @@ main() {
     fi
 
     load_managed_state
+    install_dependencies
 
     gather_inputs
     echo
@@ -1292,9 +1279,7 @@ main() {
         log "Cover site  : $MASK_SITE"
     fi
     echo
-    confirm "Proceed" default-yes allow-assume || die "Aborted by user."
-
-    install_dependencies
+    confirm "Proceed" default-yes || die "Aborted by user."
     check_dns "$DOMAIN"
 
     ensure_caddy_account

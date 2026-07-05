@@ -28,38 +28,6 @@ wget -qO- https://raw.githubusercontent.com/LowOrbitLab/naivecd/main/install.sh 
 The installer asks for confirmation before making changes. For higher assurance,
 download `install.sh`, review it, and run it with root privileges.
 
-## Configuration
-
-The interactive installer prompts for required values. You can prefill them with
-environment variables:
-
-```bash
-sudo NAIVE_DOMAIN=proxy.example.com \
-     NAIVE_COVER_MODE=static \
-     NAIVE_PORT=443 \
-     NAIVE_STATIC_ROOT=/var/www/naive-cover \
-     bash install.sh
-```
-
-Reverse-proxy cover example:
-
-```bash
-sudo NAIVE_DOMAIN=proxy.example.com \
-     NAIVE_COVER_MODE=proxy \
-     NAIVE_PORT=8443 \
-     NAIVE_MASK_SITE=https://www.example.com \
-     bash install.sh
-```
-
-Useful variables:
-
-- `NAIVE_DOMAIN`: proxy domain name
-- `NAIVE_PORT`: public HTTPS/NaiveProxy port, default `443`
-- `NAIVE_COVER_MODE`: `static` or `proxy`
-- `NAIVE_STATIC_ROOT`: static cover root, default `/var/www/naive-cover`
-- `NAIVE_MASK_SITE`: reverse-proxy cover origin
-- `NAIVE_CADDY_INSTALL=build`: force local `xcaddy` source build
-
 ## Output Files
 
 - `/etc/caddy/Caddyfile`

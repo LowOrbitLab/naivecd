@@ -57,6 +57,5 @@ under `/root/naivecd-backups/<timestamp>/`.
 - Do not enable Cloudflare orange-cloud proxy for the NaiveProxy domain.
 - Do not use sensitive paths as the static site root.
 - This script does not configure firewall rules.
-- This script does not enable BBR or tune kernel networking.
 - The default amd64 path uses a pinned prebuilt Caddy archive with SHA256
   verification; other cases fall back to pinned source-build inputs.

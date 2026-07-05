@@ -30,7 +30,9 @@ wget -qO- https://raw.githubusercontent.com/LowOrbitLab/naivecd/main/install.sh 
 
 The pipe-to-shell form is provided for convenience. For higher operational assurance, download `install.sh`, review it, and then run it with root privileges.
 
-The installer asks for confirmation before making changes.
+The installer asks for confirmation before making changes. Set `NAIVE_YES=1`
+only for trusted automation where you intentionally want confirmation prompts to
+be accepted automatically.
 
 ## Supply-Chain Pins
 
@@ -81,6 +83,7 @@ https://www.lovense.com
 
 ## Non-interactive Examples
 
+Set `NAIVE_YES=1` to accept confirmation prompts during trusted automation.
 Set `NAIVE_PORT` to choose the public HTTPS/NaiveProxy port; it defaults to `443`. Set `NAIVE_CADDY_INSTALL=build` to force local `xcaddy` source build instead of the default prebuilt amd64 binary.
 
 Static cover:
@@ -89,6 +92,7 @@ Static cover:
 wget -qO- https://raw.githubusercontent.com/LowOrbitLab/naivecd/main/install.sh | \
   sudo NAIVE_DOMAIN=proxy.example.com \
        NAIVE_COVER_MODE=static \
+       NAIVE_YES=1 \
        NAIVE_PORT=443 \
        NAIVE_STATIC_ROOT=/var/www/naive-cover \
        bash
@@ -100,6 +104,7 @@ Reverse-proxy cover:
 wget -qO- https://raw.githubusercontent.com/LowOrbitLab/naivecd/main/install.sh | \
   sudo NAIVE_DOMAIN=proxy.example.com \
        NAIVE_COVER_MODE=proxy \
+       NAIVE_YES=1 \
        NAIVE_PORT=8443 \
        NAIVE_MASK_SITE=https://www.lovense.com \
        bash

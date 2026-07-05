@@ -43,11 +43,19 @@ cleanup_tmp() {
 }
 trap cleanup_tmp EXIT INT TERM
 
+assume_yes() {
+    [[ "${NAIVE_YES:-}" =~ ^(1|y|Y|yes|YES|true|TRUE)$ ]]
+}
+
 confirm() {
     # confirm "Question" [default-yes|default-no]
     local prompt="$1" default="${2:-default-no}" reply
     local hint="[y/N]"
     [[ "$default" == "default-yes" ]] && hint="[Y/n]"
+    if assume_yes; then
+        log "Auto-confirmed: ${prompt}"
+        return 0
+    fi
     while true; do
         read -r -p "$(printf '%s? %s ' "$prompt" "$hint")" reply </dev/tty || return 1
         reply="${reply:-}"
@@ -613,10 +621,14 @@ validate_mask_site() {
 }
 
 validate_static_root() {
-    [[ "$STATIC_ROOT" == /var/www/* || "$STATIC_ROOT" == /srv/* ]] \
-        || die "Static site root must be under /var/www/ or /srv/: $STATIC_ROOT"
+    command -v realpath >/dev/null 2>&1 || die "Missing required command: realpath"
+    [[ "$STATIC_ROOT" == /* ]] \
+        || die "Static site root must be an absolute path: $STATIC_ROOT"
     [[ "$STATIC_ROOT" != *[[:space:]]* ]] \
         || die "Static site root must not contain whitespace: $STATIC_ROOT"
+    STATIC_ROOT="$(realpath -m -- "$STATIC_ROOT")"
+    [[ "$STATIC_ROOT" == /var/www/* || "$STATIC_ROOT" == /srv/* ]] \
+        || die "Static site root must resolve under /var/www/ or /srv/: $STATIC_ROOT"
 }
 
 validate_naive_port() {
@@ -917,10 +929,21 @@ install_caddy_binary() {
     ok "Installed: $($CADDY_BIN version | head -n1)"
 }
 
+random_alnum() {
+    local value
+    while true; do
+        value="$(openssl rand -base64 96 | tr -dc 'A-Za-z0-9')"
+        if (( ${#value} >= 16 )); then
+            printf '%s' "${value:0:16}"
+            return 0
+        fi
+    done
+}
+
 generate_credentials() {
     log "Generating credentials..."
-    NAIVE_USER="$(openssl rand -base64 64 | tr -dc 'A-Za-z0-9' | head -c 16)"
-    NAIVE_PASS="$(openssl rand -base64 64 | tr -dc 'A-Za-z0-9' | head -c 16)"
+    NAIVE_USER="$(random_alnum)"
+    NAIVE_PASS="$(random_alnum)"
     [[ ${#NAIVE_USER} -eq 16 && ${#NAIVE_PASS} -eq 16 ]] \
         || die "Failed to generate credentials"
     ok "Credentials generated"

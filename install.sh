@@ -424,7 +424,10 @@ uninstall_caddy_naive() {
 
     log "Removing managed resources..."
     [[ "$unit_managed" == "1" ]] && remove_managed_file "$SYSTEMD_UNIT"
-    [[ "$MANAGED_CADDY_BIN" == "1" ]] && remove_managed_file "$CADDY_BIN"
+    if [[ "$MANAGED_CADDY_BIN" == "1" ]]; then
+        systemctl stop caddy 2>/dev/null || true
+        remove_managed_file "$CADDY_BIN"
+    fi
     [[ "$caddyfile_managed" == "1" ]] && remove_managed_file "$CADDYFILE"
     [[ "$cred_managed" == "1" ]] && remove_managed_file "$CRED_FILE"
     [[ "$MANAGED_CLIENT_CONFIG" == "1" ]] && remove_managed_file "$CLIENT_CONFIG"

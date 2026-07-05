@@ -951,7 +951,11 @@ generate_credentials() {
 
 write_static_cover_site() {
     [[ "$COVER_MODE" == "static" ]] || return 0
+    local public_origin="https://${DOMAIN}"
     log "Preparing local static cover site at ${STATIC_ROOT}..."
+    if [[ "$NAIVE_PORT" != "443" ]]; then
+        public_origin="https://${DOMAIN}:${NAIVE_PORT}"
+    fi
     if [[ -n "$STATE_STATIC_ROOT" && "$STATE_STATIC_ROOT" != "$STATIC_ROOT" ]]; then
         MANAGED_STATIC_ROOT_CREATED=0
         MANAGED_STATIC_INDEX=0
@@ -971,24 +975,251 @@ write_static_cover_site() {
     fi
     if [[ ! -e "${STATIC_ROOT}/index.html" ]]; then
         cat > "${STATIC_ROOT}/index.html" <<EOF
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${DOMAIN}</title>
-  <style>
-    body { margin: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1f2933; background: #f7f7f5; }
-    main { max-width: 760px; margin: 12vh auto; padding: 0 24px; }
-    h1 { font-size: clamp(2rem, 5vw, 4rem); margin-bottom: 0.25em; }
-    p { font-size: 1.1rem; line-height: 1.65; color: #52606d; }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Global Edge Content Delivery Network. Fast, secure, and reliable static asset hosting.">
+    <meta name="robots" content="noindex, nofollow">
+    <title>Static Edge | Global CDN Service</title>
+    <style>
+        :root {
+            --bg-color: #fafafa;
+            --text-main: #171717;
+            --text-muted: #737373;
+            --border-color: #e5e5e5;
+            --code-bg: #1a1a1a;
+            --code-text: #e5e5e5;
+            --code-keyword: #ff7b72;
+            --code-string: #a5d6ff;
+            --code-comment: #8b949e;
+            --font-stack: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #0f1115;
+                --text-main: #f5f5f5;
+                --text-muted: #a3a3a3;
+                --border-color: #262a33;
+                --code-bg: #171a21;
+                --code-text: #e6edf3;
+                --code-keyword: #ff7b72;
+                --code-string: #a5d6ff;
+                --code-comment: #8b949e;
+            }
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: var(--font-stack);
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            line-height: 1.6;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 0 24px;
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        header {
+            text-align: left;
+            padding: 60px 0 40px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            letter-spacing: -0.03em;
+            margin-bottom: 12px;
+        }
+
+        .subtitle {
+            font-size: 1.125rem;
+            color: var(--text-muted);
+            max-width: 600px;
+        }
+
+        main {
+            padding: 40px 0;
+        }
+
+        .code-block {
+            background-color: var(--code-bg);
+            color: var(--code-text);
+            padding: 20px;
+            border-radius: 8px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 0.875rem;
+            overflow-x: auto;
+            margin-bottom: 40px;
+        }
+
+        .code-block .keyword { color: var(--code-keyword); }
+        .code-block .string { color: var(--code-string); }
+        .code-block .comment { color: var(--code-comment); }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 32px;
+        }
+
+        .feature-item h3 {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .feature-item p {
+            font-size: 0.9375rem;
+            color: var(--text-muted);
+        }
+
+        footer {
+            padding: 32px 0;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.875rem;
+            color: var(--text-muted);
+        }
+
+        .footer-links span {
+            color: var(--text-muted);
+            margin-left: 16px;
+        }
+
+        @media (max-width: 720px) {
+            .container {
+                min-height: auto;
+                justify-content: flex-start;
+                padding: 0 20px;
+            }
+
+            header {
+                padding: 44px 0 32px;
+            }
+
+            h1 {
+                font-size: 2rem;
+            }
+
+            .subtitle {
+                font-size: 1rem;
+            }
+
+            main {
+                padding: 32px 0;
+            }
+
+            .code-block {
+                padding: 16px;
+                font-size: 0.8125rem;
+                margin-bottom: 32px;
+            }
+
+            .features {
+                grid-template-columns: 1fr;
+                gap: 24px;
+            }
+
+            footer {
+                flex-direction: column;
+                gap: 16px;
+                text-align: center;
+            }
+
+            .footer-links {
+                display: flex;
+                flex-wrap: wrap;
+                justify-content: center;
+                gap: 8px 16px;
+            }
+
+            .footer-links span {
+                margin-left: 0;
+            }
+        }
+
+        @media (max-width: 420px) {
+            .container {
+                padding: 0 16px;
+            }
+
+            h1 {
+                font-size: 1.75rem;
+            }
+
+            .code-block {
+                margin-left: -4px;
+                margin-right: -4px;
+            }
+        }
+    </style>
 </head>
 <body>
-  <main>
-    <h1>${DOMAIN}</h1>
-    <p>This site is being set up. Please check back later.</p>
-  </main>
+    <div class="container">
+        <header>
+            <h1>Static Edge</h1>
+            <p class="subtitle">Distributed static resource routing and delivery network. Providing low-latency asset serving for enterprise applications.</p>
+        </header>
+
+        <main>
+            <div class="code-block">
+                <span class="comment">// Standard Endpoint Access Example</span><br><br>
+                <span class="keyword">const</span> endpoint = <span class="string">'${public_origin}/v2/static'</span>;<br>
+                <span class="keyword">const</span> region = <span class="string">'auto'</span>; <span class="comment">// Automatically routes to nearest PoP</span><br><br>
+                <span class="keyword">export default function</span> resolveAsset(id) {<br>
+                &nbsp;&nbsp;<span class="keyword">return</span> \`\${endpoint}/\${id}?region=\${region}\`;<br>
+                }
+            </div>
+
+            <div class="features">
+                <div class="feature-item">
+                    <h3>Global Edge Network</h3>
+                    <p>Distributed edge routing helps serve static resources from regional infrastructure.</p>
+                </div>
+                <div class="feature-item">
+                    <h3>Managed Asset Cache</h3>
+                    <p>Static assets are cached and refreshed through standard operational workflows.</p>
+                </div>
+                <div class="feature-item">
+                    <h3>Secure Delivery</h3>
+                    <p>Modern transport security is used for serving public object payloads.</p>
+                </div>
+            </div>
+        </main>
+
+        <footer>
+            <div class="copyright">
+                &copy; <script>document.write(new Date().getFullYear())</script> Static Edge Infrastructure.
+            </div>
+            <div class="footer-links">
+                <span>Documentation</span>
+                <span>API Reference</span>
+                <span>Terms of Service</span>
+            </div>
+        </footer>
+    </div>
 </body>
 </html>
 EOF

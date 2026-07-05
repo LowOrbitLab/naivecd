@@ -1604,14 +1604,13 @@ main() {
     write_caddyfile
 
     write_systemd_unit
-    write_managed_state
-    start_caddy
-    wait_for_caddy_active
-
     save_credentials_file
     write_client_config
     write_singbox_config
     write_managed_state
+    start_caddy
+    wait_for_caddy_active
+
     print_summary
 }
 

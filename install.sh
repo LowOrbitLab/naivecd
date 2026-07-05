@@ -1229,14 +1229,15 @@ EOF
 
 write_caddyfile() {
     log "Writing ${CADDYFILE}..."
+    local tmp
     if [[ ! -d "$CADDY_DIR" ]]; then
         MANAGED_CADDY_DIR_CREATED=1
     fi
     mkdir -p "$CADDY_DIR"
     chgrp "$CADDY_GROUP" "$CADDY_DIR"
     chmod u+rwx,g+rx "$CADDY_DIR"
-    backup_path "$CADDYFILE" "before Caddyfile replacement"
-    cat > "$CADDYFILE" <<EOF
+    tmp="$(mktemp "${CADDYFILE}.XXXXXX")"
+    cat > "$tmp" <<EOF
 # Managed by naivecd. The installer may replace this file during reconfiguration.
 :${NAIVE_PORT}, ${DOMAIN}:${NAIVE_PORT}
 tls naive@${DOMAIN}
@@ -1251,23 +1252,29 @@ route {
 
 EOF
     if [[ "$COVER_MODE" == "static" ]]; then
-        cat >> "$CADDYFILE" <<EOF
+        cat >> "$tmp" <<EOF
   root * ${STATIC_ROOT}
   file_server
 EOF
     else
-        cat >> "$CADDYFILE" <<EOF
+        cat >> "$tmp" <<EOF
   reverse_proxy ${MASK_SITE} {
     header_up Host {upstream_hostport}
     header_up X-Forwarded-Host {host}
   }
 EOF
     fi
-    cat >> "$CADDYFILE" <<EOF
+    cat >> "$tmp" <<EOF
 }
 EOF
-    chown "root:$CADDY_GROUP" "$CADDYFILE"
-    chmod 0640 "$CADDYFILE"
+    chown "root:$CADDY_GROUP" "$tmp"
+    chmod 0640 "$tmp"
+    if ! "$CADDY_BIN" validate --config "$tmp"; then
+        rm -f -- "$tmp"
+        die "Generated Caddyfile failed validation; existing ${CADDYFILE} was left unchanged."
+    fi
+    backup_path "$CADDYFILE" "before Caddyfile replacement"
+    mv "$tmp" "$CADDYFILE"
     MANAGED_CADDYFILE=1
     ok "Caddyfile written"
 }
@@ -1320,7 +1327,11 @@ EOF
 start_caddy() {
     log "Enabling and starting caddy.service..."
     systemctl enable caddy >/dev/null 2>&1
-    systemctl restart caddy
+    if ! systemctl restart caddy; then
+        err "caddy.service failed to restart. Last 50 log lines:"
+        journalctl -u caddy -n 50 --no-pager >&2
+        die "Aborting. Inspect logs above (often: invalid config, ACME error, port conflict, DNS misconfig)."
+    fi
 }
 
 wait_for_caddy_active() {

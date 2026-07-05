@@ -43,19 +43,11 @@ cleanup_tmp() {
 }
 trap cleanup_tmp EXIT INT TERM
 
-assume_yes() {
-    [[ "${NAIVE_YES:-}" =~ ^(1|y|Y|yes|YES|true|TRUE)$ ]]
-}
-
 confirm() {
     # confirm "Question" [default-yes|default-no]
     local prompt="$1" default="${2:-default-no}" reply
     local hint="[y/N]"
     [[ "$default" == "default-yes" ]] && hint="[Y/n]"
-    if assume_yes; then
-        log "Auto-confirmed: ${prompt}"
-        return 0
-    fi
     while true; do
         read -r -p "$(printf '%s? %s ' "$prompt" "$hint")" reply </dev/tty || return 1
         reply="${reply:-}"

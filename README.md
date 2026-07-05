@@ -30,9 +30,8 @@ wget -qO- https://raw.githubusercontent.com/LowOrbitLab/naivecd/main/install.sh 
 
 The pipe-to-shell form is provided for convenience. For higher operational assurance, download `install.sh`, review it, and then run it with root privileges.
 
-The installer asks for confirmation before making changes. Set `NAIVE_YES=1`
-only for trusted automation where you intentionally want confirmation prompts to
-be accepted automatically.
+The installer asks for confirmation before making changes, even when values are
+provided through environment variables.
 
 ## Supply-Chain Pins
 
@@ -69,7 +68,7 @@ Default mode. Caddy serves files from:
 /var/www/naive-cover
 ```
 
-If `index.html` does not exist, the installer creates a small placeholder page.
+If `index.html` does not exist, the installer creates a Static Edge cover page.
 
 ### Reverse proxy
 
@@ -81,10 +80,13 @@ Example:
 https://www.lovense.com
 ```
 
-## Non-interactive Examples
+## Environment-driven Examples
 
-Set `NAIVE_YES=1` to accept confirmation prompts during trusted automation.
-Set `NAIVE_PORT` to choose the public HTTPS/NaiveProxy port; it defaults to `443`. Set `NAIVE_CADDY_INSTALL=build` to force local `xcaddy` source build instead of the default prebuilt amd64 binary.
+These examples prefill installer inputs through environment variables, but the
+installer still asks for confirmation before making changes. Set `NAIVE_PORT`
+to choose the public HTTPS/NaiveProxy port; it defaults to `443`. Set
+`NAIVE_CADDY_INSTALL=build` to force local `xcaddy` source build instead of the
+default prebuilt amd64 binary.
 
 Static cover:
 
@@ -92,7 +94,6 @@ Static cover:
 wget -qO- https://raw.githubusercontent.com/LowOrbitLab/naivecd/main/install.sh | \
   sudo NAIVE_DOMAIN=proxy.example.com \
        NAIVE_COVER_MODE=static \
-       NAIVE_YES=1 \
        NAIVE_PORT=443 \
        NAIVE_STATIC_ROOT=/var/www/naive-cover \
        bash
@@ -104,7 +105,6 @@ Reverse-proxy cover:
 wget -qO- https://raw.githubusercontent.com/LowOrbitLab/naivecd/main/install.sh | \
   sudo NAIVE_DOMAIN=proxy.example.com \
        NAIVE_COVER_MODE=proxy \
-       NAIVE_YES=1 \
        NAIVE_PORT=8443 \
        NAIVE_MASK_SITE=https://www.lovense.com \
        bash
@@ -149,7 +149,7 @@ The uninstall option can remove managed:
 - `/etc/caddy/credentials.txt`
 - `/root/naive-client-config.json`
 - `/root/naive-singbox.json`
-- the generated static placeholder `index.html`, only if it is unchanged
+- the generated Static Edge `index.html`, only if it is unchanged
 - empty managed directories, only when they were created by the installer
 
 It preserves unmarked Caddy files, existing `/etc/caddy` contents, modified or pre-existing static site assets, Caddy TLS state under `/var/lib/caddy`, Go toolchains, DNS records, firewall rules, and the `caddy` system user/group.

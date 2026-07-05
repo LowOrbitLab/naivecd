@@ -28,6 +28,21 @@ on_err() {
 }
 trap 'on_err $LINENO' ERR
 
+TMP_DIRS=()
+
+register_tmp() {
+    [[ -n "$1" ]] && TMP_DIRS+=("$1")
+}
+
+cleanup_tmp() {
+    local d
+    [[ ${#TMP_DIRS[@]} -eq 0 ]] && return 0
+    for d in "${TMP_DIRS[@]}"; do
+        [[ -n "$d" && -d "$d" ]] && rm -rf -- "$d" || true
+    done
+}
+trap cleanup_tmp EXIT INT TERM
+
 confirm() {
     # confirm "Question" [default-yes|default-no]
     local prompt="$1" default="${2:-default-no}" reply
@@ -759,6 +774,7 @@ install_go() {
 
     mkdir -p "$TMP_BUILD_DIR"
     download_dir="$(mktemp -d -p "$TMP_BUILD_DIR" go-download.XXXXXX)"
+    register_tmp "$download_dir"
     tarball="${GO_VERSION}.linux-${ARCH}.tar.gz"
     tarball_path="${download_dir}/${tarball}"
     url="https://go.dev/dl/${tarball}"
@@ -816,6 +832,7 @@ download_prebuilt_caddy() {
     local download_dir archive extracted_bin
     mkdir -p "$TMP_BUILD_DIR"
     download_dir="$(mktemp -d -p "$TMP_BUILD_DIR" caddy-prebuilt.XXXXXX)"
+    register_tmp "$download_dir"
     archive="${download_dir}/caddy-forwardproxy-naive.tar.xz"
 
     if ! wget -q -O "$archive" "$PREBUILT_CADDY_URL"; then
@@ -862,6 +879,7 @@ build_caddy() {
     log "Building Caddy ${CADDY_CORE_VERSION} with ${FORWARDPROXY_MODULE} (this takes a few minutes)..."
     local build_dir
     build_dir="$(mktemp -d -p "$TMP_BUILD_DIR" caddy-build.XXXXXX)"
+    register_tmp "$build_dir"
     pushd "$build_dir" >/dev/null
     "${GOPATH}/bin/xcaddy" build "$CADDY_CORE_VERSION" \
         --with "github.com/caddyserver/forwardproxy=${FORWARDPROXY_MODULE}"

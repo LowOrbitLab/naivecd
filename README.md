@@ -17,7 +17,7 @@ One-command NaiveProxy + Caddy installer for Debian/Ubuntu VPS.
 - Public IPv4 VPS
 - Domain A record pointing to the VPS
 - Cloudflare proxy disabled / DNS-only
-- Ports `80/tcp` and `443/tcp` open
+- Ports `80/tcp` and the selected HTTPS port open (`443/tcp` by default)
 - Root access
 
 ## Install
@@ -81,7 +81,7 @@ https://www.lovense.com
 
 ## Non-interactive Examples
 
-Set `NAIVE_CADDY_INSTALL=build` to force local `xcaddy` source build instead of the default prebuilt amd64 binary.
+Set `NAIVE_PORT` to choose the public HTTPS/NaiveProxy port; it defaults to `443`. Set `NAIVE_CADDY_INSTALL=build` to force local `xcaddy` source build instead of the default prebuilt amd64 binary.
 
 Static cover:
 
@@ -89,6 +89,7 @@ Static cover:
 wget -qO- https://raw.githubusercontent.com/LowOrbitLab/naivecd/main/install.sh | \
   sudo NAIVE_DOMAIN=proxy.example.com \
        NAIVE_COVER_MODE=static \
+       NAIVE_PORT=443 \
        NAIVE_STATIC_ROOT=/var/www/naive-cover \
        bash
 ```
@@ -99,6 +100,7 @@ Reverse-proxy cover:
 wget -qO- https://raw.githubusercontent.com/LowOrbitLab/naivecd/main/install.sh | \
   sudo NAIVE_DOMAIN=proxy.example.com \
        NAIVE_COVER_MODE=proxy \
+       NAIVE_PORT=8443 \
        NAIVE_MASK_SITE=https://www.lovense.com \
        bash
 ```
@@ -108,7 +110,7 @@ wget -qO- https://raw.githubusercontent.com/LowOrbitLab/naivecd/main/install.sh 
 | Path | Purpose |
 |---|---|
 | `/etc/caddy/Caddyfile` | Caddy + NaiveProxy config |
-| `/etc/caddy/credentials.txt` | Credentials and URI |
+| `/etc/caddy/credentials.txt` | Credentials, selected port, and URI |
 | `/etc/caddy/naivecd-managed.env` | Managed-state record used for conservative uninstall |
 | `/root/naive-client-config.json` | Naive CLI config |
 | `/root/naive-singbox.json` | sing-box outbound JSON |
@@ -151,7 +153,7 @@ It preserves unmarked Caddy files, existing `/etc/caddy` contents, modified or p
 
 - Do not enable Cloudflare orange-cloud proxy for the NaiveProxy domain.
 - Do not use sensitive paths as the static site root.
-- This script does not configure firewall rules.
+- This script does not configure firewall rules; open `80/tcp` plus the selected HTTPS port yourself.
 - This script does not enable BBR or tune kernel networking.
 
 ## Sources

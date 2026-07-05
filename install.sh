@@ -73,6 +73,7 @@ require_cmd() {
 
 readonly DEFAULT_MASK_SITE="https://www.lovense.com"
 readonly DEFAULT_STATIC_ROOT="/var/www/naive-cover"
+readonly DEFAULT_NAIVE_PORT="443"
 readonly PREBUILT_CADDY_TAG="v2.11.2-naive"
 readonly PREBUILT_CADDY_URL="https://github.com/klzgrad/forwardproxy/releases/download/${PREBUILT_CADDY_TAG}/caddy-forwardproxy-naive.tar.xz"
 readonly PREBUILT_CADDY_SHA256="19eccb7321dd877a5fb4a3dba6ef1b745185188b616c96cc6201f1a1fc0380a8"
@@ -188,9 +189,9 @@ check_dns() {
 }
 
 check_ports() {
-    local port busy_pid busy_proc
+    local port busy_pid busy_proc ports=(80 "$NAIVE_PORT")
     require_cmd ss
-    for port in 80 443; do
+    for port in "${ports[@]}"; do
         busy_pid="$(ss -tlnpH "sport = :${port}" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -n1 || true)"
         if [[ -n "$busy_pid" ]]; then
             busy_proc="$(ps -p "$busy_pid" -o comm= 2>/dev/null || echo unknown)"
@@ -206,7 +207,7 @@ check_ports() {
             kill -9 "$busy_pid" 2>/dev/null || true
         fi
     done
-    ok "Ports 80 and 443 are available"
+    ok "Ports 80 and ${NAIVE_PORT} are available"
 }
 
 reset_managed_state() {
@@ -600,6 +601,15 @@ validate_static_root() {
         || die "Static site root must not contain whitespace: $STATIC_ROOT"
 }
 
+validate_naive_port() {
+    [[ "$NAIVE_PORT" =~ ^[0-9]+$ ]] \
+        || die "Invalid NAIVE_PORT: $NAIVE_PORT (expected an integer port)"
+    (( NAIVE_PORT >= 1 && NAIVE_PORT <= 65535 )) \
+        || die "Invalid NAIVE_PORT: $NAIVE_PORT (expected 1-65535)"
+    [[ "$NAIVE_PORT" != "80" ]] \
+        || die "NAIVE_PORT must not be 80 because port 80 is reserved for ACME HTTP validation"
+}
+
 gather_inputs() {
     # Populates globals: DOMAIN, COVER_MODE, MASK_SITE or STATIC_ROOT
     if [[ -n "${NAIVE_DOMAIN:-}" ]]; then
@@ -611,6 +621,13 @@ gather_inputs() {
 
     [[ "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] \
         || die "Invalid domain: '$DOMAIN' (expected something like proxy.example.com — no scheme, no port, no path)"
+
+    if [[ -n "${NAIVE_PORT:-}" ]]; then
+        log "NaiveProxy HTTPS port from env: $NAIVE_PORT"
+    else
+        NAIVE_PORT="$(prompt_value 'NaiveProxy HTTPS port' "$DEFAULT_NAIVE_PORT")"
+    fi
+    validate_naive_port
 
     if [[ -n "${NAIVE_COVER_MODE:-}" ]]; then
         COVER_MODE="$(normalize_cover_mode "$NAIVE_COVER_MODE")" \
@@ -958,7 +975,7 @@ write_caddyfile() {
     backup_path "$CADDYFILE" "before Caddyfile replacement"
     cat > "$CADDYFILE" <<EOF
 # Managed by naivecd. The installer may replace this file during reconfiguration.
-:443, ${DOMAIN}
+:${NAIVE_PORT}, ${DOMAIN}:${NAIVE_PORT}
 tls naive@${DOMAIN}
 
 route {
@@ -1051,7 +1068,7 @@ wait_for_caddy_active() {
             # Systemd reports active even before ACME finishes — probe TLS to confirm
             # cert issued. Drop -f so HTTP 4xx/5xx from the mask reverse_proxy still
             # counts as a successful TLS handshake.
-            if curl -sS --max-time 5 -o /dev/null "https://${DOMAIN}" 2>/dev/null; then
+            if curl -sS --max-time 5 -o /dev/null "https://${DOMAIN}:${NAIVE_PORT}" 2>/dev/null; then
                 ok "Caddy is active and TLS endpoint responding"
                 return 0
             fi
@@ -1066,7 +1083,7 @@ wait_for_caddy_active() {
         # the OLD value 0 → exit 1 → script dies silently before cert arrives).
         ((++i))
     done
-    warn "Caddy did not respond on https://${DOMAIN} within 120s."
+    warn "Caddy did not respond on https://${DOMAIN}:${NAIVE_PORT} within 120s."
     warn "Recent logs:"
     journalctl -u caddy -n 30 --no-pager >&2
     confirm "Continue anyway (cert may still be issuing)" default-no \
@@ -1084,6 +1101,7 @@ save_credentials_file() {
 # NaiveProxy credentials — generated $(date -Iseconds)
 # Domain:     ${DOMAIN}
 # Cover mode: ${COVER_MODE}
+# Port:       ${NAIVE_PORT}
 EOF
     if [[ "$COVER_MODE" == "static" ]]; then
         printf '# Static root: %s\n' "$STATIC_ROOT" >> "$CRED_FILE"
@@ -1093,7 +1111,7 @@ EOF
     cat >> "$CRED_FILE" <<EOF
 NAIVE_USER='${NAIVE_USER}'
 NAIVE_PASS='${NAIVE_PASS}'
-NAIVE_URL='naive+https://${NAIVE_USER}:${NAIVE_PASS}@${DOMAIN}:443?padding=1#NaiveProxy'
+NAIVE_URL='naive+https://${NAIVE_USER}:${NAIVE_PASS}@${DOMAIN}:${NAIVE_PORT}?padding=1#NaiveProxy'
 EOF
     chown root:root "$CRED_FILE"
     chmod 600 "$CRED_FILE"
@@ -1105,7 +1123,7 @@ write_client_config() {
     cat > "$CLIENT_CONFIG" <<EOF
 {
   "listen": "socks://127.0.0.1:10808",
-  "proxy": "https://${NAIVE_USER}:${NAIVE_PASS}@${DOMAIN}"
+  "proxy": "https://${NAIVE_USER}:${NAIVE_PASS}@${DOMAIN}:${NAIVE_PORT}"
 }
 EOF
     chown root:root "$CLIENT_CONFIG"
@@ -1122,7 +1140,7 @@ write_singbox_config() {
       "type": "naive",
       "tag": "NaiveProxy",
       "server": "${DOMAIN}",
-      "server_port": 443,
+      "server_port": ${NAIVE_PORT},
       "username": "${NAIVE_USER}",
       "password": "${NAIVE_PASS}",
       "tls": {
@@ -1186,17 +1204,18 @@ show_existing_client_config() {
 }
 
 print_summary() {
-    local uri="naive+https://${NAIVE_USER}:${NAIVE_PASS}@${DOMAIN}:443?padding=1#NaiveProxy"
+    local uri="naive+https://${NAIVE_USER}:${NAIVE_PASS}@${DOMAIN}:${NAIVE_PORT}?padding=1#NaiveProxy"
 
     echo
     printf '%s════════════════════════════════════════════════════════════════════%s\n' "$C_BOLD" "$C_RST"
-    printf '%s  NaiveProxy is up at https://%s%s\n' "$C_BOLD" "$DOMAIN" "$C_RST"
+    printf '%s  NaiveProxy is up at https://%s:%s%s\n' "$C_BOLD" "$DOMAIN" "$NAIVE_PORT" "$C_RST"
     printf '%s════════════════════════════════════════════════════════════════════%s\n' "$C_BOLD" "$C_RST"
     echo
 
     printf '%sCredentials%s\n' "$C_BOLD" "$C_RST"
     printf '  user: %s\n' "$NAIVE_USER"
     printf '  pass: %s\n' "$NAIVE_PASS"
+    printf '  port: %s\n' "$NAIVE_PORT"
     printf '  saved to: %s\n' "$CRED_FILE"
     echo
 
@@ -1284,6 +1303,7 @@ main() {
     echo
     log "NaiveProxy setup summary:"
     log "Domain      : $DOMAIN"
+    log "Port        : $NAIVE_PORT"
     log "Cover mode  : $COVER_MODE"
     if [[ "$COVER_MODE" == "static" ]]; then
         log "Static root : $STATIC_ROOT"

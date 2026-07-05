@@ -215,11 +215,7 @@ check_ports() {
                 log "It's a previous Caddy process — will be replaced by systemd unit."
                 continue
             fi
-            confirm "Stop process $busy_proc (PID $busy_pid) and continue" default-no \
-                || die "Aborted by user. Free port :$port manually and retry."
-            kill "$busy_pid" 2>/dev/null || true
-            sleep 2
-            kill -9 "$busy_pid" 2>/dev/null || true
+            die "Port :$port is busy. Stop $busy_proc (PID $busy_pid) manually and retry."
         fi
     done
     ok "Ports 80 and ${NAIVE_PORT} are available"

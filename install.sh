@@ -353,65 +353,53 @@ uninstall_caddy_naive() {
     echo >&2
 
     local any=0
-    warn "This will remove only managed resources:" >&2
+    warn "Remove:" >&2
     if [[ "$unit_managed" == "1" && -e "$SYSTEMD_UNIT" ]]; then
-        echo "  Service:" >&2
-        echo "    - ${SYSTEMD_UNIT}" >&2
+        printf '  %-10s %s\n' "service" "$SYSTEMD_UNIT" >&2
         any=1
     fi
     if [[ "$MANAGED_CADDY_BIN" == "1" && -e "$CADDY_BIN" ]]; then
-        echo "  Binary:" >&2
-        echo "    - ${CADDY_BIN}" >&2
+        printf '  %-10s %s\n' "binary" "$CADDY_BIN" >&2
         any=1
     fi
-    if [[ "$caddyfile_managed" == "1" || "$cred_managed" == "1" || -e "$STATE_FILE" ]]; then
-        echo "  Config:" >&2
-        if [[ "$caddyfile_managed" == "1" && -e "$CADDYFILE" ]]; then
-            echo "    - ${CADDYFILE}" >&2
-            any=1
-        fi
-        if [[ "$cred_managed" == "1" && -e "$CRED_FILE" ]]; then
-            echo "    - ${CRED_FILE}" >&2
-            any=1
-        fi
-        if [[ -e "$STATE_FILE" ]]; then
-            echo "    - ${STATE_FILE}" >&2
-            any=1
-        fi
+    if [[ "$caddyfile_managed" == "1" && -e "$CADDYFILE" ]]; then
+        printf '  %-10s %s\n' "config" "$CADDYFILE" >&2
+        any=1
     fi
-    if [[ "$MANAGED_CLIENT_CONFIG" == "1" || "$MANAGED_SINGBOX_CONFIG" == "1" ]]; then
-        echo "  Client configs:" >&2
-        if [[ "$MANAGED_CLIENT_CONFIG" == "1" && -e "$CLIENT_CONFIG" ]]; then
-            echo "    - ${CLIENT_CONFIG}" >&2
-            any=1
-        fi
-        if [[ "$MANAGED_SINGBOX_CONFIG" == "1" && -e "$SINGBOX_CONFIG" ]]; then
-            echo "    - ${SINGBOX_CONFIG}" >&2
-            any=1
-        fi
+    if [[ "$cred_managed" == "1" && -e "$CRED_FILE" ]]; then
+        printf '  %-10s %s\n' "config" "$CRED_FILE" >&2
+        any=1
     fi
-    if [[ "$MANAGED_STATIC_INDEX" == "1" || "$MANAGED_STATIC_ROOT_CREATED" == "1" ]]; then
-        echo "  Static cover:" >&2
-        if [[ "$MANAGED_STATIC_INDEX" == "1" && -n "$static_root_to_review" ]]; then
-            echo "    - ${static_root_to_review}/index.html, if unchanged from the installer placeholder" >&2
-            any=1
-        fi
-        if [[ "$MANAGED_STATIC_ROOT_CREATED" == "1" && -n "$static_root_to_review" ]]; then
-            echo "    - ${static_root_to_review}/, only if empty after the managed placeholder is removed" >&2
-            any=1
-        fi
+    if [[ -e "$STATE_FILE" ]]; then
+        printf '  %-10s %s\n' "state" "$STATE_FILE" >&2
+        any=1
+    fi
+    if [[ "$MANAGED_CLIENT_CONFIG" == "1" && -e "$CLIENT_CONFIG" ]]; then
+        printf '  %-10s %s\n' "client" "$CLIENT_CONFIG" >&2
+        any=1
+    fi
+    if [[ "$MANAGED_SINGBOX_CONFIG" == "1" && -e "$SINGBOX_CONFIG" ]]; then
+        printf '  %-10s %s\n' "client" "$SINGBOX_CONFIG" >&2
+        any=1
+    fi
+    if [[ "$MANAGED_STATIC_INDEX" == "1" && -n "$static_root_to_review" ]]; then
+        printf '  %-10s %s    %s\n' "static" "${static_root_to_review}/index.html" "if unchanged" >&2
+        any=1
+    fi
+    if [[ "$MANAGED_STATIC_ROOT_CREATED" == "1" && -n "$static_root_to_review" ]]; then
+        printf '  %-10s %s\n' "empty-dir" "$static_root_to_review" >&2
+        any=1
     fi
     if [[ "$MANAGED_CADDY_DIR_CREATED" == "1" ]]; then
-        echo "  Directories:" >&2
-        echo "    - ${CADDY_DIR}/, only if empty after managed files are removed" >&2
+        printf '  %-10s %s\n' "empty-dir" "$CADDY_DIR" >&2
         any=1
     fi
 
     echo >&2
-    warn "Preserved by default:" >&2
-    echo "    - unmarked Caddy files and custom/static site content" >&2
-    echo "    - Caddy TLS state and certificates under ${CADDY_STATE_DIR}" >&2
-    echo "    - Go toolchains, DNS records, and firewall rules" >&2
+    warn "Keep:" >&2
+    printf '  %-10s %s\n' "data" "$CADDY_STATE_DIR" >&2
+    printf '  %-10s %s\n' "custom" "unmarked Caddy/static files" >&2
+    printf '  %-10s %s\n' "system" "Go toolchains, DNS records, firewall rules" >&2
     if (( any == 0 )); then
         echo >&2
         warn "No managed resources were found to remove." >&2

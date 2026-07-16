@@ -153,6 +153,15 @@ test_term_exits_instead_of_continuing() {
         || { printf '测试失败：TERM 后脚本仍继续执行\n' >&2; exit 1; }
 }
 
+test_stdin_entry_guard_handles_unset_bash_source() {
+    local output
+    output="$(printf '%s\n' \
+        'set -u' \
+        'if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then echo ENTRY_OK; fi' \
+        | bash)"
+    assert_eq "ENTRY_OK" "$output" "管道执行时入口保护必须兼容未定义的 BASH_SOURCE"
+}
+
 test_valid_state_loads
 test_invalid_state_fails_closed
 test_writable_state_is_rejected
@@ -162,5 +171,6 @@ test_transaction_snapshot_restores_file
 test_transaction_snapshot_removes_new_file
 test_managed_checksum_rejects_modified_file
 test_term_exits_instead_of_continuing
+test_stdin_entry_guard_handles_unset_bash_source
 
 printf '全部安全边界测试通过。\n'

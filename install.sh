@@ -1529,7 +1529,7 @@ EOF
 
 write_caddyfile() {
     log "Writing ${CADDYFILE}..."
-    local tmp
+    local tmp validation_log
     if [[ ! -d "$CADDY_DIR" ]]; then
         MANAGED_CADDY_DIR_CREATED=1
     elif [[ -z "$STATE_CADDY_DIR_METADATA" ]]; then
@@ -1569,12 +1569,24 @@ EOF
     cat >> "$tmp" <<EOF
 }
 EOF
-    chown "root:$CADDY_GROUP" "$tmp"
-    chmod 0640 "$tmp"
-    if ! "$CADDY_BIN" validate --config "$tmp"; then
-        rm -f -- "$tmp"
+    validation_log="$(mktemp "${CADDYFILE}.validate.XXXXXX")"
+    register_tmp "$validation_log"
+    if ! "$CADDY_BIN" fmt --overwrite "$tmp" >"$validation_log" 2>&1; then
+        err "Failed to format generated Caddyfile:"
+        sed 's/^/    /' "$validation_log" >&2
+        rm -f -- "$tmp" "$validation_log"
+        die "Generated Caddyfile could not be formatted; existing ${CADDYFILE} was left unchanged."
+    fi
+    if ! "$CADDY_BIN" validate --config "$tmp" >"$validation_log" 2>&1; then
+        err "Generated Caddyfile validation output:"
+        sed 's/^/    /' "$validation_log" >&2
+        rm -f -- "$tmp" "$validation_log"
         die "Generated Caddyfile failed validation; existing ${CADDYFILE} was left unchanged."
     fi
+    rm -f -- "$validation_log"
+    chown "root:$CADDY_GROUP" "$tmp"
+    chmod 0640 "$tmp"
+    ok "Caddy configuration is valid"
     record_resource_origin ORIGIN_CADDYFILE ORIGINAL_CADDYFILE_BACKUP "$CADDYFILE"
     backup_path "$CADDYFILE" "before Caddyfile replacement"
     mv "$tmp" "$CADDYFILE"

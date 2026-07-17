@@ -23,7 +23,9 @@ die()   { err "$*"; exit 1; }
 
 on_err() {
     local code=$? line=${1:-?}
+    trap - ERR
     err "Failed at line $line (exit $code). Last command: ${BASH_COMMAND}"
+    rollback_transaction || true
     exit "$code"
 }
 trap 'on_err $LINENO' ERR
@@ -41,7 +43,27 @@ cleanup_tmp() {
         [[ -n "$d" && -d "$d" ]] && rm -rf -- "$d" || true
     done
 }
-trap cleanup_tmp EXIT INT TERM
+
+on_exit() {
+    local code=$?
+    trap - ERR
+    if (( TRANSACTION_ACTIVE == 1 && TRANSACTION_COMMITTED == 0 )); then
+        rollback_transaction || true
+    fi
+    cleanup_tmp
+    return "$code"
+}
+trap on_exit EXIT
+
+on_signal() {
+    local code="$1" signal="$2"
+    trap - ERR INT TERM
+    warn "Received ${signal}; rolling back the current installation."
+    rollback_transaction || true
+    exit "$code"
+}
+trap 'on_signal 130 INT' INT
+trap 'on_signal 143 TERM' TERM
 
 confirm() {
     # confirm "Question" [default-yes|default-no]
@@ -131,6 +153,42 @@ STATE_STATIC_ROOT=""
 STATE_STATIC_INDEX_SHA256=""
 BACKUP_SESSION_DIR=""
 BACKUP_QUIET=0
+LAST_BACKUP_PATH=""
+TRANSACTION_ACTIVE=0
+TRANSACTION_COMMITTED=0
+TRANSACTION_DIR=""
+TRANSACTION_SERVICE_ACTIVE=0
+TRANSACTION_SERVICE_ENABLED=0
+TRANSACTION_PATHS=()
+TRANSACTION_PATH_EXISTED=()
+TRANSACTION_METADATA_PATHS=()
+TRANSACTION_METADATA_VALUES=()
+TRANSACTION_CADDY_DIR_EXISTED=0
+TRANSACTION_CADDY_STATE_DIR_EXISTED=0
+TRANSACTION_STATIC_ROOT_EXISTED=0
+TRANSACTION_CREATED_CADDY_USER=0
+TRANSACTION_CREATED_CADDY_GROUP=0
+TRANSACTION_INSTALLED_GO=0
+
+ORIGIN_CADDY_BIN=""
+ORIGIN_SYSTEMD_UNIT=""
+ORIGIN_CADDYFILE=""
+ORIGIN_CRED_FILE=""
+ORIGIN_CLIENT_CONFIG=""
+ORIGIN_SINGBOX_CONFIG=""
+ORIGINAL_CADDY_BIN_BACKUP=""
+ORIGINAL_SYSTEMD_UNIT_BACKUP=""
+ORIGINAL_CADDYFILE_BACKUP=""
+ORIGINAL_CRED_FILE_BACKUP=""
+ORIGINAL_CLIENT_CONFIG_BACKUP=""
+ORIGINAL_SINGBOX_CONFIG_BACKUP=""
+STATE_CADDY_DIR_METADATA=""
+STATE_CADDY_STATE_DIR_METADATA=""
+STATE_STATIC_ROOT_METADATA=""
+STATE_STATIC_INDEX_METADATA=""
+ORIGINAL_SERVICE_STATE_CAPTURED=0
+ORIGINAL_SERVICE_ACTIVE=0
+ORIGINAL_SERVICE_ENABLED=0
 
 #─────────────────────────────────────────────────────────────────────────────
 # Preflight
@@ -238,6 +296,25 @@ reset_managed_state() {
     MANAGED_CADDY_GROUP_CREATED=0
     STATE_STATIC_ROOT=""
     STATE_STATIC_INDEX_SHA256=""
+    ORIGIN_CADDY_BIN=""
+    ORIGIN_SYSTEMD_UNIT=""
+    ORIGIN_CADDYFILE=""
+    ORIGIN_CRED_FILE=""
+    ORIGIN_CLIENT_CONFIG=""
+    ORIGIN_SINGBOX_CONFIG=""
+    ORIGINAL_CADDY_BIN_BACKUP=""
+    ORIGINAL_SYSTEMD_UNIT_BACKUP=""
+    ORIGINAL_CADDYFILE_BACKUP=""
+    ORIGINAL_CRED_FILE_BACKUP=""
+    ORIGINAL_CLIENT_CONFIG_BACKUP=""
+    ORIGINAL_SINGBOX_CONFIG_BACKUP=""
+    STATE_CADDY_DIR_METADATA=""
+    STATE_CADDY_STATE_DIR_METADATA=""
+    STATE_STATIC_ROOT_METADATA=""
+    STATE_STATIC_INDEX_METADATA=""
+    ORIGINAL_SERVICE_STATE_CAPTURED=0
+    ORIGINAL_SERVICE_ACTIVE=0
+    ORIGINAL_SERVICE_ENABLED=0
 }
 
 load_managed_state() {
@@ -252,13 +329,27 @@ load_managed_state() {
             MANAGED_CADDYFILE|MANAGED_CRED_FILE|MANAGED_CLIENT_CONFIG|MANAGED_SINGBOX_CONFIG|\
             MANAGED_STATIC_ROOT_CREATED|MANAGED_STATIC_INDEX|MANAGED_GO|\
             MANAGED_CADDY_USER_CREATED|MANAGED_CADDY_GROUP_CREATED|STATE_STATIC_ROOT|\
-            STATE_STATIC_INDEX_SHA256)
+            STATE_STATIC_INDEX_SHA256|ORIGIN_CADDY_BIN|ORIGIN_SYSTEMD_UNIT|ORIGIN_CADDYFILE|\
+            ORIGIN_CRED_FILE|ORIGIN_CLIENT_CONFIG|ORIGIN_SINGBOX_CONFIG|\
+            ORIGINAL_CADDY_BIN_BACKUP|ORIGINAL_SYSTEMD_UNIT_BACKUP|ORIGINAL_CADDYFILE_BACKUP|\
+            ORIGINAL_CRED_FILE_BACKUP|ORIGINAL_CLIENT_CONFIG_BACKUP|ORIGINAL_SINGBOX_CONFIG_BACKUP|\
+            STATE_CADDY_DIR_METADATA|STATE_CADDY_STATE_DIR_METADATA|STATE_STATIC_ROOT_METADATA|STATE_STATIC_INDEX_METADATA|\
+            ORIGINAL_SERVICE_STATE_CAPTURED|ORIGINAL_SERVICE_ACTIVE|ORIGINAL_SERVICE_ENABLED)
                 printf -v "$key" '%s' "$value"
                 ;;
         esac
     done < "$STATE_FILE"
 
-    [[ "$NAIVECD_MANAGED" == "1" ]] && STATE_LOADED=1
+    if [[ "$NAIVECD_MANAGED" == "1" ]]; then
+        STATE_LOADED=1
+        # 兼容旧状态文件：旧版本只记录“由 naivecd 管理”，无法恢复安装前原件。
+        if [[ -z "$ORIGIN_CADDY_BIN" && "$MANAGED_CADDY_BIN" == "1" ]]; then ORIGIN_CADDY_BIN="created"; fi
+        if [[ -z "$ORIGIN_SYSTEMD_UNIT" && "$MANAGED_SYSTEMD_UNIT" == "1" ]]; then ORIGIN_SYSTEMD_UNIT="created"; fi
+        if [[ -z "$ORIGIN_CADDYFILE" && "$MANAGED_CADDYFILE" == "1" ]]; then ORIGIN_CADDYFILE="created"; fi
+        if [[ -z "$ORIGIN_CRED_FILE" && "$MANAGED_CRED_FILE" == "1" ]]; then ORIGIN_CRED_FILE="created"; fi
+        if [[ -z "$ORIGIN_CLIENT_CONFIG" && "$MANAGED_CLIENT_CONFIG" == "1" ]]; then ORIGIN_CLIENT_CONFIG="created"; fi
+        if [[ -z "$ORIGIN_SINGBOX_CONFIG" && "$MANAGED_SINGBOX_CONFIG" == "1" ]]; then ORIGIN_SINGBOX_CONFIG="created"; fi
+    fi
 }
 
 write_managed_state() {
@@ -282,6 +373,25 @@ write_managed_state() {
         printf 'MANAGED_CADDY_GROUP_CREATED=%s\n' "$MANAGED_CADDY_GROUP_CREATED"
         printf 'STATE_STATIC_ROOT=%s\n' "${STATE_STATIC_ROOT:-}"
         printf 'STATE_STATIC_INDEX_SHA256=%s\n' "${STATE_STATIC_INDEX_SHA256:-}"
+        printf 'ORIGIN_CADDY_BIN=%s\n' "$ORIGIN_CADDY_BIN"
+        printf 'ORIGIN_SYSTEMD_UNIT=%s\n' "$ORIGIN_SYSTEMD_UNIT"
+        printf 'ORIGIN_CADDYFILE=%s\n' "$ORIGIN_CADDYFILE"
+        printf 'ORIGIN_CRED_FILE=%s\n' "$ORIGIN_CRED_FILE"
+        printf 'ORIGIN_CLIENT_CONFIG=%s\n' "$ORIGIN_CLIENT_CONFIG"
+        printf 'ORIGIN_SINGBOX_CONFIG=%s\n' "$ORIGIN_SINGBOX_CONFIG"
+        printf 'ORIGINAL_CADDY_BIN_BACKUP=%s\n' "$ORIGINAL_CADDY_BIN_BACKUP"
+        printf 'ORIGINAL_SYSTEMD_UNIT_BACKUP=%s\n' "$ORIGINAL_SYSTEMD_UNIT_BACKUP"
+        printf 'ORIGINAL_CADDYFILE_BACKUP=%s\n' "$ORIGINAL_CADDYFILE_BACKUP"
+        printf 'ORIGINAL_CRED_FILE_BACKUP=%s\n' "$ORIGINAL_CRED_FILE_BACKUP"
+        printf 'ORIGINAL_CLIENT_CONFIG_BACKUP=%s\n' "$ORIGINAL_CLIENT_CONFIG_BACKUP"
+        printf 'ORIGINAL_SINGBOX_CONFIG_BACKUP=%s\n' "$ORIGINAL_SINGBOX_CONFIG_BACKUP"
+        printf 'STATE_CADDY_DIR_METADATA=%s\n' "$STATE_CADDY_DIR_METADATA"
+        printf 'STATE_CADDY_STATE_DIR_METADATA=%s\n' "$STATE_CADDY_STATE_DIR_METADATA"
+        printf 'STATE_STATIC_ROOT_METADATA=%s\n' "$STATE_STATIC_ROOT_METADATA"
+        printf 'STATE_STATIC_INDEX_METADATA=%s\n' "$STATE_STATIC_INDEX_METADATA"
+        printf 'ORIGINAL_SERVICE_STATE_CAPTURED=%s\n' "$ORIGINAL_SERVICE_STATE_CAPTURED"
+        printf 'ORIGINAL_SERVICE_ACTIVE=%s\n' "$ORIGINAL_SERVICE_ACTIVE"
+        printf 'ORIGINAL_SERVICE_ENABLED=%s\n' "$ORIGINAL_SERVICE_ENABLED"
     } > "$tmp"
     chown root:root "$tmp"
     chmod 0600 "$tmp"
@@ -316,6 +426,7 @@ ensure_backup_dir() {
 
 backup_path() {
     local path="$1" reason="${2:-backup}" rel dest
+    LAST_BACKUP_PATH=""
     [[ -e "$path" || -L "$path" ]] || return 0
 
     ensure_backup_dir
@@ -323,9 +434,162 @@ backup_path() {
     dest="${BACKUP_SESSION_DIR}/${rel}"
     mkdir -p "$(dirname "$dest")"
     cp -a -- "$path" "$dest"
+    LAST_BACKUP_PATH="$dest"
     if [[ "$BACKUP_QUIET" != "1" ]]; then
         ok "Backed up ${path} (${reason}) to ${dest}"
     fi
+}
+
+path_metadata() {
+    stat -c '%u:%g:%a' -- "$1"
+}
+
+restore_metadata() {
+    local path="$1" metadata="$2" uid gid mode
+    [[ -n "$metadata" && -e "$path" ]] || return 0
+    IFS=: read -r uid gid mode <<< "$metadata"
+    chown "$uid:$gid" -- "$path"
+    chmod "$mode" -- "$path"
+}
+
+record_resource_origin() {
+    local origin_var="$1" backup_var="$2" path="$3" origin rel original_dest
+    origin="${!origin_var:-}"
+    [[ -z "$origin" ]] || return 0
+    if [[ -e "$path" || -L "$path" ]]; then
+        ensure_backup_dir
+        rel="${path#/}"
+        original_dest="${BACKUP_SESSION_DIR}/originals/${rel}"
+        mkdir -p "$(dirname "$original_dest")"
+        cp -a -- "$path" "$original_dest"
+        ok "Saved original resource before naivecd ownership: ${original_dest}"
+        printf -v "$origin_var" '%s' "replaced"
+        printf -v "$backup_var" '%s' "$original_dest"
+    else
+        printf -v "$origin_var" '%s' "created"
+    fi
+}
+
+snapshot_transaction_path() {
+    local path="$1" index=${#TRANSACTION_PATHS[@]} rel
+    TRANSACTION_PATHS+=("$path")
+    if [[ -e "$path" || -L "$path" ]]; then
+        TRANSACTION_PATH_EXISTED+=(1)
+        rel="${path#/}"
+        mkdir -p "${TRANSACTION_DIR}/files/$(dirname "$rel")"
+        cp -a -- "$path" "${TRANSACTION_DIR}/files/${rel}"
+    else
+        TRANSACTION_PATH_EXISTED+=(0)
+    fi
+}
+
+snapshot_transaction_metadata() {
+    local path="$1"
+    [[ -e "$path" ]] || return 0
+    TRANSACTION_METADATA_PATHS+=("$path")
+    TRANSACTION_METADATA_VALUES+=("$(path_metadata "$path")")
+}
+
+begin_transaction() {
+    (( TRANSACTION_ACTIVE == 0 )) || return 0
+    ensure_backup_dir
+    TRANSACTION_DIR="${BACKUP_SESSION_DIR}/transaction"
+    mkdir -p "$TRANSACTION_DIR/files"
+    chmod 0700 "$TRANSACTION_DIR"
+    systemctl is-active --quiet caddy 2>/dev/null && TRANSACTION_SERVICE_ACTIVE=1 || true
+    systemctl is-enabled --quiet caddy 2>/dev/null && TRANSACTION_SERVICE_ENABLED=1 || true
+    if [[ "$ORIGINAL_SERVICE_STATE_CAPTURED" != "1" ]]; then
+        ORIGINAL_SERVICE_STATE_CAPTURED=1
+        ORIGINAL_SERVICE_ACTIVE="$TRANSACTION_SERVICE_ACTIVE"
+        ORIGINAL_SERVICE_ENABLED="$TRANSACTION_SERVICE_ENABLED"
+    fi
+    [[ -d "$CADDY_DIR" ]] && TRANSACTION_CADDY_DIR_EXISTED=1
+    [[ -d "$CADDY_STATE_DIR" ]] && TRANSACTION_CADDY_STATE_DIR_EXISTED=1
+    [[ -n "${STATIC_ROOT:-}" && -d "$STATIC_ROOT" ]] && TRANSACTION_STATIC_ROOT_EXISTED=1
+    local path static_index=""
+    [[ -n "${STATIC_ROOT:-}" ]] && static_index="${STATIC_ROOT}/index.html"
+    for path in "$CADDY_BIN" "$SYSTEMD_UNIT" "$CADDYFILE" "$CRED_FILE" \
+        "$CLIENT_CONFIG" "$SINGBOX_CONFIG" "$STATE_FILE"; do
+        snapshot_transaction_path "$path"
+    done
+    [[ -n "$static_index" ]] && snapshot_transaction_path "$static_index"
+    snapshot_transaction_metadata "$CADDY_DIR"
+    snapshot_transaction_metadata "$CADDY_STATE_DIR"
+    [[ -n "${STATIC_ROOT:-}" ]] && snapshot_transaction_metadata "$STATIC_ROOT"
+    if [[ -n "$STATE_STATIC_ROOT" && "$STATE_STATIC_ROOT" != "${STATIC_ROOT:-}" ]]; then
+        snapshot_transaction_metadata "$STATE_STATIC_ROOT"
+        snapshot_transaction_metadata "${STATE_STATIC_ROOT}/index.html"
+    fi
+    TRANSACTION_ACTIVE=1
+    log "Installation transaction started; failures will restore the previous state."
+}
+
+restore_owned_resource() {
+    local path="$1" origin="$2" original_backup="$3" label="$4"
+    case "$origin" in
+        created)
+            remove_managed_file "$path"
+            ;;
+        replaced)
+            if [[ -e "$original_backup" || -L "$original_backup" ]]; then
+                backup_path "$path" "before restoring original ${label}"
+                rm -rf -- "$path"
+                mkdir -p "$(dirname "$path")"
+                cp -a -- "$original_backup" "$path"
+                ok "Restored original ${label}: ${path}"
+            else
+                warn "Cannot restore original ${label}; backup is missing: ${original_backup}"
+            fi
+            ;;
+        *)
+            remove_managed_file "$path"
+            ;;
+    esac
+}
+
+rollback_transaction() {
+    (( TRANSACTION_ACTIVE == 1 && TRANSACTION_COMMITTED == 0 )) || return 0
+    set +e
+    warn "Restoring files and service state from the transaction snapshot..."
+    systemctl stop caddy >/dev/null 2>&1 || true
+    local i path rel
+    for ((i=${#TRANSACTION_PATHS[@]}-1; i>=0; i--)); do
+        path="${TRANSACTION_PATHS[$i]}"
+        if [[ "${TRANSACTION_PATH_EXISTED[$i]}" == "1" ]]; then
+            rel="${path#/}"
+            rm -rf -- "$path"
+            mkdir -p "$(dirname "$path")"
+            cp -a -- "${TRANSACTION_DIR}/files/${rel}" "$path"
+        else
+            rm -rf -- "$path"
+        fi
+    done
+    for ((i=0; i<${#TRANSACTION_METADATA_PATHS[@]}; i++)); do
+        restore_metadata "${TRANSACTION_METADATA_PATHS[$i]}" "${TRANSACTION_METADATA_VALUES[$i]}"
+    done
+    (( TRANSACTION_STATIC_ROOT_EXISTED == 0 )) && [[ -n "${STATIC_ROOT:-}" ]] && rmdir "$STATIC_ROOT" 2>/dev/null || true
+    (( TRANSACTION_CADDY_DIR_EXISTED == 0 )) && rmdir "$CADDY_DIR" 2>/dev/null || true
+    (( TRANSACTION_CADDY_STATE_DIR_EXISTED == 0 )) && rm -rf -- "$CADDY_STATE_DIR"
+    (( TRANSACTION_INSTALLED_GO == 1 )) && rm -rf -- "$GO_INSTALL_DIR"
+    (( TRANSACTION_CREATED_CADDY_USER == 1 )) && userdel "$CADDY_USER" >/dev/null 2>&1 || true
+    (( TRANSACTION_CREATED_CADDY_GROUP == 1 )) && groupdel "$CADDY_GROUP" >/dev/null 2>&1 || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    if (( TRANSACTION_SERVICE_ENABLED == 1 )); then
+        systemctl enable caddy >/dev/null 2>&1 || true
+    else
+        systemctl disable caddy >/dev/null 2>&1 || true
+    fi
+    (( TRANSACTION_SERVICE_ACTIVE == 1 )) && systemctl start caddy >/dev/null 2>&1 || true
+    TRANSACTION_ACTIVE=0
+    warn "Rollback complete. Snapshot retained at ${TRANSACTION_DIR}."
+    set -e
+}
+
+commit_transaction() {
+    TRANSACTION_COMMITTED=1
+    TRANSACTION_ACTIVE=0
+    rm -rf -- "$TRANSACTION_DIR"
+    ok "Installation transaction committed."
 }
 
 file_has_naivecd_marker() {
@@ -434,15 +698,15 @@ uninstall_caddy_naive() {
     fi
 
     log "Removing managed resources..."
-    [[ "$unit_managed" == "1" ]] && remove_managed_file "$SYSTEMD_UNIT"
+    [[ "$unit_managed" == "1" ]] && restore_owned_resource "$SYSTEMD_UNIT" "$ORIGIN_SYSTEMD_UNIT" "$ORIGINAL_SYSTEMD_UNIT_BACKUP" "systemd unit"
     if [[ "$MANAGED_CADDY_BIN" == "1" ]]; then
         systemctl stop caddy 2>/dev/null || true
-        remove_managed_file "$CADDY_BIN"
+        restore_owned_resource "$CADDY_BIN" "$ORIGIN_CADDY_BIN" "$ORIGINAL_CADDY_BIN_BACKUP" "Caddy binary"
     fi
-    [[ "$caddyfile_managed" == "1" ]] && remove_managed_file "$CADDYFILE"
-    [[ "$cred_managed" == "1" ]] && remove_managed_file "$CRED_FILE"
-    [[ "$MANAGED_CLIENT_CONFIG" == "1" ]] && remove_managed_file "$CLIENT_CONFIG"
-    [[ "$MANAGED_SINGBOX_CONFIG" == "1" ]] && remove_managed_file "$SINGBOX_CONFIG"
+    [[ "$caddyfile_managed" == "1" ]] && restore_owned_resource "$CADDYFILE" "$ORIGIN_CADDYFILE" "$ORIGINAL_CADDYFILE_BACKUP" "Caddyfile"
+    [[ "$cred_managed" == "1" ]] && restore_owned_resource "$CRED_FILE" "$ORIGIN_CRED_FILE" "$ORIGINAL_CRED_FILE_BACKUP" "credentials file"
+    [[ "$MANAGED_CLIENT_CONFIG" == "1" ]] && restore_owned_resource "$CLIENT_CONFIG" "$ORIGIN_CLIENT_CONFIG" "$ORIGINAL_CLIENT_CONFIG_BACKUP" "Naive client config"
+    [[ "$MANAGED_SINGBOX_CONFIG" == "1" ]] && restore_owned_resource "$SINGBOX_CONFIG" "$ORIGIN_SINGBOX_CONFIG" "$ORIGINAL_SINGBOX_CONFIG_BACKUP" "sing-box config"
 
     if [[ "$MANAGED_STATIC_INDEX" == "1" && -n "$static_root_to_review" ]]; then
         local static_index="${static_root_to_review}/index.html"
@@ -463,6 +727,18 @@ uninstall_caddy_naive() {
         fi
     fi
 
+    if [[ "$MANAGED_STATIC_ROOT_CREATED" != "1" && -n "$static_root_to_review" ]]; then
+        restore_metadata "$static_root_to_review" "$STATE_STATIC_ROOT_METADATA"
+        if [[ "$MANAGED_STATIC_INDEX" != "1" ]]; then
+            restore_metadata "${static_root_to_review}/index.html" "$STATE_STATIC_INDEX_METADATA"
+        fi
+    fi
+
+    if [[ "$MANAGED_CADDY_DIR_CREATED" != "1" ]]; then
+        restore_metadata "$CADDY_DIR" "$STATE_CADDY_DIR_METADATA"
+    fi
+    restore_metadata "$CADDY_STATE_DIR" "$STATE_CADDY_STATE_DIR_METADATA"
+
     remove_managed_file "$STATE_FILE"
 
     if [[ "$MANAGED_CADDY_DIR_CREATED" == "1" && -d "$CADDY_DIR" ]]; then
@@ -476,6 +752,12 @@ uninstall_caddy_naive() {
     if [[ "$unit_managed" == "1" ]]; then
         systemctl daemon-reload
         systemctl reset-failed caddy.service >/dev/null 2>&1 || true
+        if [[ "$ORIGINAL_SERVICE_ENABLED" == "1" && "$ORIGIN_SYSTEMD_UNIT" == "replaced" ]]; then
+            systemctl enable caddy >/dev/null 2>&1 || warn "Could not re-enable the original caddy.service."
+        fi
+        if [[ "$ORIGINAL_SERVICE_ACTIVE" == "1" && "$ORIGIN_SYSTEMD_UNIT" == "replaced" ]]; then
+            systemctl start caddy >/dev/null 2>&1 || warn "Could not restart the original caddy.service."
+        fi
     fi
 
     if [[ "$MANAGED_GO" == "1" && -d "${GO_INSTALL_DIR}" ]]; then
@@ -702,8 +984,12 @@ install_dependencies() {
 
 ensure_caddy_account() {
     log "Preparing dedicated Caddy runtime account..."
+    if [[ -d "$CADDY_STATE_DIR" && -z "$STATE_CADDY_STATE_DIR_METADATA" ]]; then
+        STATE_CADDY_STATE_DIR_METADATA="$(path_metadata "$CADDY_STATE_DIR")"
+    fi
     if ! getent group "$CADDY_GROUP" >/dev/null 2>&1; then
         groupadd --system "$CADDY_GROUP"
+        TRANSACTION_CREATED_CADDY_GROUP=1
         MANAGED_CADDY_GROUP_CREATED=1
         ok "Created system group: ${CADDY_GROUP}"
     else
@@ -719,6 +1005,7 @@ ensure_caddy_account() {
             --shell "$nologin" \
             --comment "Caddy web server" \
             "$CADDY_USER"
+        TRANSACTION_CREATED_CADDY_USER=1
         MANAGED_CADDY_USER_CREATED=1
         ok "Created system user: ${CADDY_USER}"
     else
@@ -794,6 +1081,7 @@ install_go() {
 
     export PATH="${GO_INSTALL_DIR}/bin:$PATH"
     MANAGED_GO=1
+    TRANSACTION_INSTALLED_GO=1
     ok "Installed $(go version)"
 }
 
@@ -903,6 +1191,7 @@ prepare_caddy_binary() {
 
 install_caddy_binary() {
     log "Installing Caddy binary to ${CADDY_BIN}..."
+    record_resource_origin ORIGIN_CADDY_BIN ORIGINAL_CADDY_BIN_BACKUP "$CADDY_BIN"
     if systemctl is-active --quiet caddy 2>/dev/null; then
         log "Stopping running caddy.service before binary swap..."
         systemctl stop caddy
@@ -945,12 +1234,20 @@ write_static_cover_site() {
         public_origin="https://${DOMAIN}:${NAIVE_PORT}"
     fi
     if [[ -n "$STATE_STATIC_ROOT" && "$STATE_STATIC_ROOT" != "$STATIC_ROOT" ]]; then
+        restore_metadata "$STATE_STATIC_ROOT" "$STATE_STATIC_ROOT_METADATA"
+        if [[ "$MANAGED_STATIC_INDEX" != "1" ]]; then
+            restore_metadata "${STATE_STATIC_ROOT}/index.html" "$STATE_STATIC_INDEX_METADATA"
+        fi
         MANAGED_STATIC_ROOT_CREATED=0
         MANAGED_STATIC_INDEX=0
         STATE_STATIC_INDEX_SHA256=""
+        STATE_STATIC_ROOT_METADATA=""
+        STATE_STATIC_INDEX_METADATA=""
     fi
     if [[ ! -d "$STATIC_ROOT" ]]; then
         MANAGED_STATIC_ROOT_CREATED=1
+    elif [[ -z "$STATE_STATIC_ROOT_METADATA" ]]; then
+        STATE_STATIC_ROOT_METADATA="$(path_metadata "$STATIC_ROOT")"
     fi
     mkdir -p "$STATIC_ROOT"
     # Caddy now runs as the dedicated caddy user. Grant group traversal on the
@@ -1219,6 +1516,9 @@ EOF
         ok "Default index.html written"
     else
         if [[ -f "${STATIC_ROOT}/index.html" ]]; then
+            if [[ -z "$STATE_STATIC_INDEX_METADATA" ]]; then
+                STATE_STATIC_INDEX_METADATA="$(path_metadata "${STATIC_ROOT}/index.html")"
+            fi
             chgrp "$CADDY_GROUP" "${STATIC_ROOT}/index.html"
             chmod g+r "${STATIC_ROOT}/index.html"
         fi
@@ -1232,6 +1532,8 @@ write_caddyfile() {
     local tmp
     if [[ ! -d "$CADDY_DIR" ]]; then
         MANAGED_CADDY_DIR_CREATED=1
+    elif [[ -z "$STATE_CADDY_DIR_METADATA" ]]; then
+        STATE_CADDY_DIR_METADATA="$(path_metadata "$CADDY_DIR")"
     fi
     mkdir -p "$CADDY_DIR"
     chgrp "$CADDY_GROUP" "$CADDY_DIR"
@@ -1273,6 +1575,7 @@ EOF
         rm -f -- "$tmp"
         die "Generated Caddyfile failed validation; existing ${CADDYFILE} was left unchanged."
     fi
+    record_resource_origin ORIGIN_CADDYFILE ORIGINAL_CADDYFILE_BACKUP "$CADDYFILE"
     backup_path "$CADDYFILE" "before Caddyfile replacement"
     mv "$tmp" "$CADDYFILE"
     MANAGED_CADDYFILE=1
@@ -1282,6 +1585,7 @@ EOF
 
 write_systemd_unit() {
     log "Writing ${SYSTEMD_UNIT}..."
+    record_resource_origin ORIGIN_SYSTEMD_UNIT ORIGINAL_SYSTEMD_UNIT_BACKUP "$SYSTEMD_UNIT"
     backup_path "$SYSTEMD_UNIT" "before systemd unit replacement"
     cat > "$SYSTEMD_UNIT" <<'EOF'
 [Unit]
@@ -1369,6 +1673,7 @@ wait_for_caddy_active() {
 #─────────────────────────────────────────────────────────────────────────────
 
 save_credentials_file() {
+    record_resource_origin ORIGIN_CRED_FILE ORIGINAL_CRED_FILE_BACKUP "$CRED_FILE"
     backup_path "$CRED_FILE" "before credentials replacement"
     cat > "$CRED_FILE" <<EOF
 # Managed by naivecd. This file contains generated NaiveProxy credentials.
@@ -1393,6 +1698,7 @@ EOF
 }
 
 write_client_config() {
+    record_resource_origin ORIGIN_CLIENT_CONFIG ORIGINAL_CLIENT_CONFIG_BACKUP "$CLIENT_CONFIG"
     backup_path "$CLIENT_CONFIG" "before client config replacement"
     cat > "$CLIENT_CONFIG" <<EOF
 {
@@ -1406,6 +1712,7 @@ EOF
 }
 
 write_singbox_config() {
+    record_resource_origin ORIGIN_SINGBOX_CONFIG ORIGINAL_SINGBOX_CONFIG_BACKUP "$SINGBOX_CONFIG"
     backup_path "$SINGBOX_CONFIG" "before sing-box config replacement"
     cat > "$SINGBOX_CONFIG" <<EOF
 {
@@ -1590,6 +1897,7 @@ main() {
     install_dependencies
     check_dns "$DOMAIN"
 
+    begin_transaction
     ensure_caddy_account
     check_ports
 
@@ -1609,8 +1917,11 @@ main() {
     write_managed_state
     start_caddy
     wait_for_caddy_active
+    commit_transaction
 
     print_summary
 }
 
-main "$@"
+if [[ "${NAIVECD_LIB_ONLY:-0}" != "1" ]]; then
+    main "$@"
+fi

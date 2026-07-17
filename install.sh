@@ -108,7 +108,7 @@ require_cmd() {
 # Constants
 #─────────────────────────────────────────────────────────────────────────────
 
-readonly DEFAULT_MASK_SITE="https://www.lovense.com"
+readonly DEFAULT_MASK_SITE="https://files.pythonhosted.org/"
 readonly DEFAULT_STATIC_ROOT="/var/www/naive-cover"
 readonly DEFAULT_NAIVE_PORT="443"
 readonly PREBUILT_CADDY_TAG="v2.11.2-naive"

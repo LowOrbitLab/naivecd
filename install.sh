@@ -2,7 +2,9 @@
 # NaiveProxy + Caddy auto-setup for Debian/Ubuntu VPS.
 # Repository: https://github.com/LowOrbitLab/naivecd
 
-set -euo pipefail
+# -E (errtrace) makes functions inherit the ERR trap so on_err reports the
+# real failing line; without it, failures inside functions skip on_err entirely.
+set -Eeuo pipefail
 
 #─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -24,23 +26,31 @@ die()   { err "$*"; exit 1; }
 on_err() {
     local code=$? line=${1:-?}
     trap - ERR
+    # Command substitutions inherit the ERR trap (set -E) but run in subshells
+    # where diagnostics would duplicate the parent's and rollback is pointless:
+    # exit quietly and let the parent handle (or guard) the failure.
+    if (( BASH_SUBSHELL > 0 )); then
+        exit "$code"
+    fi
     err "Failed at line $line (exit $code). Last command: ${BASH_COMMAND}"
     rollback_transaction || true
     exit "$code"
 }
 trap 'on_err $LINENO' ERR
 
-TMP_DIRS=()
+TMP_PATHS=()
 
 register_tmp() {
-    [[ -n "$1" ]] && TMP_DIRS+=("$1")
+    if [[ -n "${1:-}" ]]; then
+        TMP_PATHS+=("$1")
+    fi
 }
 
 cleanup_tmp() {
-    local d
-    [[ ${#TMP_DIRS[@]} -eq 0 ]] && return 0
-    for d in "${TMP_DIRS[@]}"; do
-        [[ -n "$d" && -d "$d" ]] && rm -rf -- "$d" || true
+    local p
+    [[ ${#TMP_PATHS[@]} -eq 0 ]] && return 0
+    for p in "${TMP_PATHS[@]}"; do
+        [[ -n "$p" && -e "$p" ]] && rm -rf -- "$p" || true
     done
 }
 
@@ -153,7 +163,6 @@ STATE_STATIC_ROOT=""
 STATE_STATIC_INDEX_SHA256=""
 BACKUP_SESSION_DIR=""
 BACKUP_QUIET=0
-LAST_BACKUP_PATH=""
 TRANSACTION_ACTIVE=0
 TRANSACTION_COMMITTED=0
 TRANSACTION_DIR=""
@@ -189,6 +198,7 @@ STATE_STATIC_INDEX_METADATA=""
 ORIGINAL_SERVICE_STATE_CAPTURED=0
 ORIGINAL_SERVICE_ACTIVE=0
 ORIGINAL_SERVICE_ENABLED=0
+SYSTEMD_UNIT_CHANGED=1
 
 #─────────────────────────────────────────────────────────────────────────────
 # Preflight
@@ -210,19 +220,32 @@ detect_arch() {
 
 detect_os() {
     [[ -r /etc/os-release ]] || die "Cannot read /etc/os-release; this script supports Debian/Ubuntu only."
+    # Source os-release in subshells so its variables (ID, NAME, VERSION, ...)
+    # do not leak into this script's namespace.
+    local os_id os_pretty
     # shellcheck disable=SC1091
-    . /etc/os-release
-    case "${ID:-}" in
-        debian|ubuntu) ok "Detected ${PRETTY_NAME:-$ID}" ;;
-        *) die "Unsupported OS: ${ID:-unknown} (supported: debian, ubuntu)" ;;
+    os_id="$(. /etc/os-release 2>/dev/null && printf '%s' "${ID:-}" || true)"
+    # shellcheck disable=SC1091
+    os_pretty="$(. /etc/os-release 2>/dev/null && printf '%s' "${PRETTY_NAME:-}" || true)"
+    case "$os_id" in
+        debian|ubuntu) ok "Detected ${os_pretty:-$os_id}" ;;
+        *) die "Unsupported OS: ${os_id:-unknown} (supported: debian, ubuntu)" ;;
     esac
 }
 
+has_caddy_unit() {
+    # systemd < 246 exits 0 from `list-unit-files <pattern>` even when nothing
+    # matches, so check the output instead of the exit code.
+    [[ -f "$SYSTEMD_UNIT" ]] && return 0
+    [[ "$(systemctl list-unit-files caddy.service 2>/dev/null)" == *"caddy.service"* ]]
+}
+
 get_external_ip() {
-    # Try multiple endpoints; first one wins.
-    local ip
+    # Try multiple endpoints; first one wins. Force IPv4 so a v6-preferring
+    # host does not return an address the A-record check cannot use.
+    local ip url
     for url in https://api.ipify.org https://ifconfig.me https://ipinfo.io/ip; do
-        ip="$(curl -fsS --max-time 5 "$url" 2>/dev/null || true)"
+        ip="$(curl -4 -fsS --max-time 5 "$url" 2>/dev/null || true)"
         if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             printf '%s' "$ip"
             return 0
@@ -231,9 +254,39 @@ get_external_ip() {
     return 1
 }
 
+get_external_ipv6() {
+    local ip url
+    for url in https://api6.ipify.org https://ifconfig.me; do
+        ip="$(curl -6 -fsS --max-time 5 "$url" 2>/dev/null || true)"
+        if [[ "$ip" == *:* && "$ip" =~ ^[0-9a-fA-F:]+$ ]]; then
+            printf '%s' "$ip"
+            return 0
+        fi
+    done
+    return 1
+}
+
+resolve_records() {
+    # resolve_records A|AAAA <domain> — prints matching records, one per line.
+    # Falls back from 1.1.1.1 to the system resolver; prints nothing on failure
+    # instead of letting a dig error abort the script.
+    local rrtype="$1" domain="$2" out filter
+    case "$rrtype" in
+        A)    filter='^[0-9.]+$' ;;
+        AAAA) filter='^[0-9a-fA-F:]+$' ;;
+        *)    return 1 ;;
+    esac
+    out="$(dig +short "$rrtype" "$domain" @1.1.1.1 2>/dev/null)" || out=""
+    if [[ -z "$out" ]]; then
+        out="$(dig +short "$rrtype" "$domain" 2>/dev/null)" || out=""
+    fi
+    printf '%s\n' "$out" | grep -E "$filter" || true
+}
+
 check_dns() {
-    local domain="$1" external_ip resolved_ips
+    local domain="$1" external_ip resolved_ips resolved_v6
     log "Checking DNS for $domain..."
+    require_cmd dig
 
     if ! external_ip="$(get_external_ip)"; then
         warn "Could not detect this server's external IP — skipping DNS check."
@@ -241,10 +294,9 @@ check_dns() {
     fi
     log "Server external IP: $external_ip"
 
-    require_cmd dig
-    resolved_ips="$(dig +short A "$domain" @1.1.1.1)"
+    resolved_ips="$(resolve_records A "$domain")"
     if [[ -z "$resolved_ips" ]]; then
-        warn "Domain $domain has no A-record (or DNS not yet propagated)."
+        warn "Domain $domain has no A-record (or DNS not yet propagated / resolver unreachable)."
         confirm "Continue anyway (ACME will fail until DNS resolves)" default-no \
             || die "Aborted by user. Configure DNS A-record first."
         return 0
@@ -259,6 +311,34 @@ check_dns() {
         confirm "Continue anyway" default-no \
             || die "Aborted by user. Fix DNS A-record first."
     fi
+
+    # A stray AAAA record can break ACME even when the A record is correct,
+    # because Let's Encrypt prefers IPv6 when both exist. Warn-only: v6
+    # detection from this host is best-effort.
+    resolved_v6="$(resolve_records AAAA "$domain")"
+    if [[ -n "$resolved_v6" ]]; then
+        local external_ip6=""
+        external_ip6="$(get_external_ipv6 || true)"
+        if [[ -n "$external_ip6" ]] && printf '%s\n' "${resolved_v6,,}" | grep -Fxq "${external_ip6,,}"; then
+            ok "AAAA check passed: $domain → $external_ip6"
+        else
+            warn "Domain $domain has AAAA record(s) [$(printf '%s' "$resolved_v6" | tr '\n' ' ')] that could not be confirmed to point at this server."
+            warn "If IPv6 is misconfigured, ACME validation (which may prefer IPv6) can fail; remove the AAAA record if in doubt."
+        fi
+    fi
+}
+
+check_firewall() {
+    # Warn-only: a host firewall blocking 80/NAIVE_PORT turns into confusing
+    # ACME timeouts later, so surface it before any changes are made.
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | head -n1 | grep -q 'Status: active'; then
+        warn "ufw is active. Make sure TCP ports 80 and ${NAIVE_PORT} are allowed, e.g.:"
+        warn "  ufw allow 80/tcp && ufw allow ${NAIVE_PORT}/tcp"
+    fi
+    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        warn "firewalld is running. Make sure TCP ports 80 and ${NAIVE_PORT} are open."
+    fi
+    return 0
 }
 
 check_ports() {
@@ -276,6 +356,17 @@ check_ports() {
             die "Port :$port is busy. Stop $busy_proc (PID $busy_pid) manually and retry."
         fi
     done
+
+    # Caddy also binds UDP :NAIVE_PORT for HTTP/3 (QUIC); a conflict there is
+    # not fatal (TCP still serves), so warn instead of dying.
+    local udp_pid udp_proc
+    udp_pid="$(ss -ulnpH "sport = :${NAIVE_PORT}" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -n1 || true)"
+    if [[ -n "$udp_pid" ]]; then
+        udp_proc="$(ps -p "$udp_pid" -o comm= 2>/dev/null || echo unknown)"
+        if [[ "$udp_proc" != "caddy" ]]; then
+            warn "UDP :${NAIVE_PORT} is in use by ${udp_proc} (PID ${udp_pid}); HTTP/3 (QUIC) may be unavailable."
+        fi
+    fi
     ok "Ports 80 and ${NAIVE_PORT} are available"
 }
 
@@ -426,7 +517,6 @@ ensure_backup_dir() {
 
 backup_path() {
     local path="$1" reason="${2:-backup}" rel dest
-    LAST_BACKUP_PATH=""
     [[ -e "$path" || -L "$path" ]] || return 0
 
     ensure_backup_dir
@@ -434,10 +524,48 @@ backup_path() {
     dest="${BACKUP_SESSION_DIR}/${rel}"
     mkdir -p "$(dirname "$dest")"
     cp -a -- "$path" "$dest"
-    LAST_BACKUP_PATH="$dest"
     if [[ "$BACKUP_QUIET" != "1" ]]; then
         ok "Backed up ${path} (${reason}) to ${dest}"
     fi
+}
+
+prune_backup_sessions() {
+    # Each (re)install session copies the ~40MB Caddy binary into a new
+    # timestamped directory; without pruning, /root/naivecd-backups grows
+    # unbounded. Keep the newest sessions plus any session that still holds
+    # "originals" referenced by the managed state (needed for uninstall).
+    local keep=5
+    [[ -d "$BACKUP_ROOT" ]] || return 0
+    local -a sessions=()
+    local name
+    while IFS= read -r name; do
+        sessions+=("$name")
+    done < <(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort -r)
+    (( ${#sessions[@]} > keep )) || return 0
+    local -a referenced=(
+        "$ORIGINAL_CADDY_BIN_BACKUP" "$ORIGINAL_SYSTEMD_UNIT_BACKUP"
+        "$ORIGINAL_CADDYFILE_BACKUP" "$ORIGINAL_CRED_FILE_BACKUP"
+        "$ORIGINAL_CLIENT_CONFIG_BACKUP" "$ORIGINAL_SINGBOX_CONFIG_BACKUP"
+    )
+    local i dir ref skip pruned=0
+    for ((i=keep; i<${#sessions[@]}; i++)); do
+        dir="${BACKUP_ROOT}/${sessions[$i]}"
+        [[ -n "$BACKUP_SESSION_DIR" && "$dir" == "$BACKUP_SESSION_DIR" ]] && continue
+        skip=0
+        for ref in "${referenced[@]}"; do
+            if [[ -n "$ref" && "$ref" == "$dir"/* ]]; then
+                skip=1
+                break
+            fi
+        done
+        (( skip == 1 )) && continue
+        rm -rf -- "$dir"
+        ((++pruned))
+    done
+    if (( pruned > 0 )); then
+        log "Pruned ${pruned} old backup session(s) under ${BACKUP_ROOT} (kept newest ${keep} plus referenced originals)."
+    fi
+    return 0
 }
 
 path_metadata() {
@@ -471,7 +599,7 @@ record_resource_origin() {
 }
 
 snapshot_transaction_path() {
-    local path="$1" index=${#TRANSACTION_PATHS[@]} rel
+    local path="$1" rel
     TRANSACTION_PATHS+=("$path")
     if [[ -e "$path" || -L "$path" ]]; then
         TRANSACTION_PATH_EXISTED+=(1)
@@ -670,6 +798,14 @@ uninstall_caddy_naive() {
         printf '  %-10s %s\n' "empty-dir" "$CADDY_DIR" >&2
         any=1
     fi
+    if [[ "$MANAGED_CADDY_USER_CREATED" == "1" ]] && id -u "$CADDY_USER" >/dev/null 2>&1; then
+        printf '  %-10s %s\n' "user" "$CADDY_USER" >&2
+        any=1
+    fi
+    if [[ "$MANAGED_CADDY_GROUP_CREATED" == "1" ]] && getent group "$CADDY_GROUP" >/dev/null 2>&1; then
+        printf '  %-10s %s\n' "group" "$CADDY_GROUP" >&2
+        any=1
+    fi
 
     echo >&2
     warn "Keep:" >&2
@@ -689,11 +825,11 @@ uninstall_caddy_naive() {
     ensure_backup_dir
     log "Backup directory: ${BACKUP_SESSION_DIR}"
 
-    if [[ "$unit_managed" == "1" ]] && systemctl list-unit-files caddy.service >/dev/null 2>&1; then
+    if [[ "$unit_managed" == "1" ]] && has_caddy_unit; then
         log "Stopping and disabling caddy.service..."
         systemctl stop caddy 2>/dev/null || true
         systemctl disable caddy >/dev/null 2>&1 || true
-    elif systemctl list-unit-files caddy.service >/dev/null 2>&1; then
+    elif has_caddy_unit; then
         warn "Preserving caddy.service because it is not marked as managed by naivecd."
     fi
 
@@ -760,6 +896,23 @@ uninstall_caddy_naive() {
         fi
     fi
 
+    # Remove the runtime account only when this installer created it; the
+    # user goes first so the group is no longer its primary group.
+    if [[ "$MANAGED_CADDY_USER_CREATED" == "1" ]] && id -u "$CADDY_USER" >/dev/null 2>&1; then
+        if userdel "$CADDY_USER" >/dev/null 2>&1; then
+            ok "Removed system user ${CADDY_USER}"
+        else
+            warn "Could not remove system user ${CADDY_USER} (still in use?); remove it manually if desired."
+        fi
+    fi
+    if [[ "$MANAGED_CADDY_GROUP_CREATED" == "1" ]] && getent group "$CADDY_GROUP" >/dev/null 2>&1; then
+        if groupdel "$CADDY_GROUP" >/dev/null 2>&1; then
+            ok "Removed system group ${CADDY_GROUP}"
+        else
+            warn "Could not remove system group ${CADDY_GROUP} (still in use?); remove it manually if desired."
+        fi
+    fi
+
     if [[ "$MANAGED_GO" == "1" && -d "${GO_INSTALL_DIR}" ]]; then
         warn "Preserving managed Go toolchain at ${GO_INSTALL_DIR}; remove it manually if it is no longer needed."
     fi
@@ -769,14 +922,10 @@ uninstall_caddy_naive() {
 }
 
 handle_existing_caddy() {
-    # Returns mode via stdout: "rebuild" | "reconfigure" | "show" | "uninstall" | "fresh"
-    if [[ ! -x "$CADDY_BIN" ]] && ! systemctl list-unit-files caddy.service >/dev/null 2>&1; then
-        echo "fresh"
-        return 0
-    fi
-
+    # Interactive menu for an existing installation. Sets the global MODE to
+    # one of: rebuild | reconfigure | show | uninstall (or exits).
     local service_status="not installed"
-    if systemctl list-unit-files caddy.service >/dev/null 2>&1; then
+    if has_caddy_unit; then
         if systemctl is-active --quiet caddy 2>/dev/null; then
             service_status="active"
         else
@@ -796,7 +945,7 @@ handle_existing_caddy() {
     echo "" >&2
     echo "Choose action:" >&2
     echo "  1) Reinstall NaiveProxy" >&2
-    echo "  2) Reconfigure" >&2
+    echo "  2) Reconfigure (keeps existing credentials)" >&2
     if [[ "$has_saved_config" -eq 1 ]]; then
         echo "  3) Show client config" >&2
         echo "  4) Uninstall" >&2
@@ -816,30 +965,32 @@ handle_existing_caddy() {
     fi
 
     while true; do
-        read -r -p "$prompt" choice </dev/tty
+        read -r -p "$prompt" choice </dev/tty \
+            || die "No input available; run the installer in an interactive terminal."
         case "$choice" in
-            1) echo "rebuild";     return 0 ;;
-            2) echo "reconfigure"; return 0 ;;
+            1) MODE="rebuild";     return 0 ;;
+            2) MODE="reconfigure"; return 0 ;;
             3)
                 if [[ "$has_saved_config" -eq 1 ]]; then
-                    echo "show"
-                    return 0
+                    MODE="show"
                 else
-                    echo "uninstall"
-                    return 0
+                    MODE="uninstall"
                 fi
+                return 0
                 ;;
             4)
                 if [[ "$has_saved_config" -eq 1 ]]; then
-                    echo "uninstall"
+                    MODE="uninstall"
                     return 0
                 else
-                    die "Exited by user choice."
+                    log "Exited by user choice."
+                    exit 0
                 fi
                 ;;
             5)
                 if [[ "$has_saved_config" -eq 1 ]]; then
-                    die "Exited by user choice."
+                    log "Exited by user choice."
+                    exit 0
                 else
                     echo "Invalid choice." >&2
                 fi
@@ -977,8 +1128,10 @@ install_dependencies() {
     fi
     log "Installing apt dependencies (${missing[*]})..."
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -y -qq "${missing[@]}" >/dev/null
+    # Fresh VPSes often have unattended-upgrades holding the dpkg lock; wait
+    # for it instead of failing immediately.
+    apt-get -o DPkg::Lock::Timeout=60 update -qq
+    apt-get -o DPkg::Lock::Timeout=60 install -y -qq "${missing[@]}" >/dev/null
     ok "apt dependencies installed"
 }
 
@@ -1076,12 +1229,14 @@ install_go() {
         die "Refusing to extract Go tarball after checksum failure."
     fi
 
+    # Mark before extracting: an interrupted tar would otherwise leave a
+    # partial /usr/local/go that neither rollback nor a rerun can handle.
+    MANAGED_GO=1
+    TRANSACTION_INSTALLED_GO=1
     tar -C /usr/local -xzf "$tarball_path"
     rm -rf "$download_dir"
 
     export PATH="${GO_INSTALL_DIR}/bin:$PATH"
-    MANAGED_GO=1
-    TRANSACTION_INSTALLED_GO=1
     ok "Installed $(go version)"
 }
 
@@ -1217,7 +1372,25 @@ random_alnum() {
     done
 }
 
+load_existing_credentials() {
+    # Parses NAIVE_USER / NAIVE_PASS back out of the credentials file without
+    # sourcing it. Returns non-zero when absent or not cleanly parseable.
+    [[ -r "$CRED_FILE" ]] || return 1
+    local user pass
+    user="$(awk -F"'" '/^NAIVE_USER=/{print $2; exit}' "$CRED_FILE")" || return 1
+    pass="$(awk -F"'" '/^NAIVE_PASS=/{print $2; exit}' "$CRED_FILE")" || return 1
+    [[ "$user" =~ ^[A-Za-z0-9]+$ && "$pass" =~ ^[A-Za-z0-9]+$ ]] || return 1
+    NAIVE_USER="$user"
+    NAIVE_PASS="$pass"
+}
+
 generate_credentials() {
+    # Reconfigure keeps the existing credentials so deployed clients survive
+    # a settings change; a reinstall still rotates them.
+    if [[ "${MODE:-}" == "reconfigure" ]] && load_existing_credentials; then
+        ok "Reusing existing credentials from ${CRED_FILE}"
+        return 0
+    fi
     log "Generating credentials..."
     NAIVE_USER="$(random_alnum)"
     NAIVE_PASS="$(random_alnum)"
@@ -1237,6 +1410,8 @@ write_static_cover_site() {
         restore_metadata "$STATE_STATIC_ROOT" "$STATE_STATIC_ROOT_METADATA"
         if [[ "$MANAGED_STATIC_INDEX" != "1" ]]; then
             restore_metadata "${STATE_STATIC_ROOT}/index.html" "$STATE_STATIC_INDEX_METADATA"
+        elif [[ -f "${STATE_STATIC_ROOT}/index.html" ]]; then
+            warn "Cover page from the previous install remains at ${STATE_STATIC_ROOT}/index.html; remove it manually if unneeded."
         fi
         MANAGED_STATIC_ROOT_CREATED=0
         MANAGED_STATIC_INDEX=0
@@ -1258,7 +1433,16 @@ write_static_cover_site() {
     if [[ "$MANAGED_STATIC_ROOT_CREATED" == "1" ]]; then
         chmod 0755 "$STATIC_ROOT"
     fi
-    if [[ ! -e "${STATIC_ROOT}/index.html" ]]; then
+    # If the existing page is one we generated and the user never touched it
+    # (checksum matches the managed state), regenerate it so the embedded
+    # origin follows a domain/port change. User-modified pages are preserved.
+    local regen_managed=0
+    if [[ -f "${STATIC_ROOT}/index.html" && "$MANAGED_STATIC_INDEX" == "1" && -n "$STATE_STATIC_INDEX_SHA256" ]] \
+        && [[ "$(file_sha256 "${STATIC_ROOT}/index.html")" == "$STATE_STATIC_INDEX_SHA256" ]]; then
+        regen_managed=1
+        log "Managed cover page is unmodified; regenerating it for the current settings."
+    fi
+    if [[ ! -e "${STATIC_ROOT}/index.html" || "$regen_managed" == "1" ]]; then
         cat > "${STATIC_ROOT}/index.html" <<EOF
 <!DOCTYPE html>
 <html lang="en">
@@ -1539,6 +1723,7 @@ write_caddyfile() {
     chgrp "$CADDY_GROUP" "$CADDY_DIR"
     chmod u+rwx,g+rx "$CADDY_DIR"
     tmp="$(mktemp "${CADDYFILE}.XXXXXX")"
+    register_tmp "$tmp"
     cat > "$tmp" <<EOF
 # Managed by naivecd. The installer may replace this file during reconfiguration.
 :${NAIVE_PORT}, ${DOMAIN}:${NAIVE_PORT}
@@ -1597,14 +1782,15 @@ EOF
 
 write_systemd_unit() {
     log "Writing ${SYSTEMD_UNIT}..."
-    record_resource_origin ORIGIN_SYSTEMD_UNIT ORIGINAL_SYSTEMD_UNIT_BACKUP "$SYSTEMD_UNIT"
-    backup_path "$SYSTEMD_UNIT" "before systemd unit replacement"
-    cat > "$SYSTEMD_UNIT" <<'EOF'
+    local tmp
+    tmp="$(mktemp "${SYSTEMD_UNIT}.XXXXXX")"
+    register_tmp "$tmp"
+    cat > "$tmp" <<'EOF'
 [Unit]
 Description=Caddy with NaiveProxy
 # Managed by naivecd. The installer may replace this unit during reconfiguration.
 After=network.target network-online.target
-Requires=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=notify
@@ -1621,6 +1807,12 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 ReadWritePaths=/var/lib/caddy
 StateDirectory=caddy
 RuntimeDirectory=caddy
@@ -1633,16 +1825,40 @@ RestartSec=5s
 [Install]
 WantedBy=multi-user.target
 EOF
-    chown root:root "$SYSTEMD_UNIT"
-    chmod 0644 "$SYSTEMD_UNIT"
+    chown root:root "$tmp"
+    chmod 0644 "$tmp"
+    if [[ -f "$SYSTEMD_UNIT" ]] && cmp -s -- "$tmp" "$SYSTEMD_UNIT"; then
+        rm -f -- "$tmp"
+        SYSTEMD_UNIT_CHANGED=0
+        MANAGED_SYSTEMD_UNIT=1
+        ok "systemd unit already up to date"
+        return 0
+    fi
+    record_resource_origin ORIGIN_SYSTEMD_UNIT ORIGINAL_SYSTEMD_UNIT_BACKUP "$SYSTEMD_UNIT"
+    backup_path "$SYSTEMD_UNIT" "before systemd unit replacement"
+    mv -- "$tmp" "$SYSTEMD_UNIT"
     MANAGED_SYSTEMD_UNIT=1
+    SYSTEMD_UNIT_CHANGED=1
     systemctl daemon-reload
     ok "systemd unit written"
 }
 
 start_caddy() {
+    systemctl enable caddy >/dev/null 2>&1 \
+        || warn "Could not enable caddy.service; run 'systemctl enable caddy' manually."
+    # On reconfigure with an unchanged unit only the Caddyfile differs, so a
+    # graceful reload keeps existing connections alive. Anything else (new
+    # binary, changed unit) needs a real restart.
+    if [[ "${MODE:-}" == "reconfigure" && "$SYSTEMD_UNIT_CHANGED" == "0" ]] \
+        && systemctl is-active --quiet caddy 2>/dev/null; then
+        log "Reloading caddy.service with the new configuration..."
+        if systemctl reload caddy 2>/dev/null; then
+            ok "caddy.service reloaded"
+            return 0
+        fi
+        warn "Graceful reload failed; falling back to restart."
+    fi
     log "Enabling and starting caddy.service..."
-    systemctl enable caddy >/dev/null 2>&1
     if ! systemctl restart caddy; then
         err "caddy.service failed to restart. Last 50 log lines:"
         journalctl -u caddy -n 50 --no-pager >&2
@@ -1652,13 +1868,16 @@ start_caddy() {
 
 wait_for_caddy_active() {
     log "Waiting for Caddy to become active and obtain TLS certificate..."
-    local i=0
-    while (( i < 60 )); do
+    local deadline=$(( SECONDS + 180 ))
+    while (( SECONDS < deadline )); do
         if systemctl is-active --quiet caddy; then
             # Systemd reports active even before ACME finishes — probe TLS to confirm
-            # cert issued. Drop -f so HTTP 4xx/5xx from the mask reverse_proxy still
-            # counts as a successful TLS handshake.
-            if curl -sS --max-time 5 -o /dev/null "https://${DOMAIN}:${NAIVE_PORT}" 2>/dev/null; then
+            # cert issued. --resolve pins the domain to 127.0.0.1 so the probe hits
+            # this server even while public DNS is still propagating. Drop -f so
+            # HTTP 4xx/5xx from the mask reverse_proxy still counts as a successful
+            # TLS handshake.
+            if curl -sS --max-time 5 --resolve "${DOMAIN}:${NAIVE_PORT}:127.0.0.1" \
+                -o /dev/null "https://${DOMAIN}:${NAIVE_PORT}" 2>/dev/null; then
                 ok "Caddy is active and TLS endpoint responding"
                 return 0
             fi
@@ -1668,12 +1887,8 @@ wait_for_caddy_active() {
             die "Aborting. Inspect logs above (often: ACME error, port conflict, DNS misconfig)."
         fi
         sleep 2
-        # Pre-increment: returns the NEW value (never 0 here), so it can't trip
-        # `set -e` on iteration 1 the way `((i++))` would (post-increment returns
-        # the OLD value 0 → exit 1 → script dies silently before cert arrives).
-        ((++i))
     done
-    warn "Caddy did not respond on https://${DOMAIN}:${NAIVE_PORT} within 120s."
+    warn "Caddy did not serve a valid TLS response on :${NAIVE_PORT} within 180s."
     warn "Recent logs:"
     journalctl -u caddy -n 30 --no-pager >&2
     confirm "Continue anyway (cert may still be issuing)" default-no \
@@ -1862,17 +2077,16 @@ print_summary() {
 main() {
     check_root
     detect_os
-    ARCH="$(detect_arch)"
+    ARCH="$(detect_arch)" || exit 1
     ok "Architecture: $ARCH"
 
-    if [[ -x "$CADDY_BIN" ]] || systemctl list-unit-files caddy.service >/dev/null 2>&1; then
-        MODE="$(handle_existing_caddy)"
+    if [[ -x "$CADDY_BIN" ]] || has_caddy_unit; then
+        handle_existing_caddy
+        log "Install mode: $MODE"
     else
-        log "Install NaiveProxy with Caddy on this server."
-        confirm "Continue" default-no || die "Aborted by user."
         MODE="fresh"
+        log "Install mode: fresh (NaiveProxy with Caddy on this server)"
     fi
-    log "Install mode: $MODE"
 
     if [[ "$MODE" == "show" ]]; then
         show_existing_client_config
@@ -1908,6 +2122,7 @@ main() {
 
     install_dependencies
     check_dns "$DOMAIN"
+    check_firewall
 
     begin_transaction
     ensure_caddy_account
@@ -1930,6 +2145,7 @@ main() {
     start_caddy
     wait_for_caddy_active
     commit_transaction
+    prune_backup_sessions
 
     print_summary
 }

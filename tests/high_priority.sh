@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034  # many globals here are consumed by sourced install.sh functions
 
 set -euo pipefail
 

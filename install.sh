@@ -129,7 +129,10 @@ readonly GO_VERSION="go1.26.4"
 readonly GO_LINUX_AMD64_SHA256="1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f"
 readonly GO_LINUX_ARM64_SHA256="ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768"
 readonly XCADDY_MODULE="github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.6"
-readonly FORWARDPROXY_MODULE="github.com/klzgrad/forwardproxy@v2.11.2-naive"
+# Pseudo-version of the commit tagged v2.11.2-naive (d62c80d3dd2c). The tag itself
+# cannot be used: the fork's go.mod path has no /v2 suffix, so Go rejects any v2.x
+# version in the replace directive ("should be v0 or v1, not v2").
+readonly FORWARDPROXY_MODULE="github.com/klzgrad/forwardproxy@v0.0.0-20250118002110-d62c80d3dd2c"
 readonly CADDY_BIN="/usr/bin/caddy"
 readonly CADDY_DIR="/etc/caddy"
 readonly CADDYFILE="${CADDY_DIR}/Caddyfile"

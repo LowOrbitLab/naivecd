@@ -68,20 +68,30 @@ trap on_exit EXIT
 on_signal() {
     local code="$1" signal="$2"
     trap - ERR INT TERM
-    warn "Received ${signal}; rolling back the current installation."
-    rollback_transaction || true
+    if (( TRANSACTION_ACTIVE == 1 && TRANSACTION_COMMITTED == 0 )); then
+        warn "Received ${signal}; rolling back the current installation."
+        rollback_transaction || true
+    else
+        warn "Received ${signal}; aborting."
+    fi
     exit "$code"
 }
 trap 'on_signal 130 INT' INT
 trap 'on_signal 143 TERM' TERM
+
+ensure_tty_readable() {
+    [[ -r "$TTY_INPUT" ]] \
+        || die "Interactive terminal (${TTY_INPUT}) is unavailable; run in a terminal (for example: ssh -t)."
+}
 
 confirm() {
     # confirm "Question" [default-yes|default-no]
     local prompt="$1" default="${2:-default-no}" reply
     local hint="[y/N]"
     [[ "$default" == "default-yes" ]] && hint="[Y/n]"
+    ensure_tty_readable
     while true; do
-        read -r -p "$(printf '%s? %s ' "$prompt" "$hint")" reply </dev/tty || return 1
+        read -r -p "$(printf '%s? %s ' "$prompt" "$hint")" reply <"$TTY_INPUT" || return 1
         reply="${reply:-}"
         if [[ -z "$reply" ]]; then
             [[ "$default" == "default-yes" ]] && return 0 || return 1
@@ -99,8 +109,9 @@ prompt_value() {
     local prompt="$1" default="${2:-}" reply
     local suffix=""
     [[ -n "$default" ]] && suffix=" [$default]"
+    ensure_tty_readable
     while true; do
-        read -r -p "$(printf '%s%s: ' "$prompt" "$suffix")" reply </dev/tty || return 1
+        read -r -p "$(printf '%s%s: ' "$prompt" "$suffix")" reply <"$TTY_INPUT" || return 1
         reply="${reply:-$default}"
         if [[ -n "$reply" ]]; then
             printf '%s' "$reply"
@@ -118,35 +129,57 @@ require_cmd() {
 # Constants
 #─────────────────────────────────────────────────────────────────────────────
 
-readonly DEFAULT_MASK_SITE="https://files.pythonhosted.org/"
+readonly DEFAULT_MASK_SITE="https://files.pythonhosted.org"
 readonly DEFAULT_STATIC_ROOT="/var/www/naive-cover"
 readonly DEFAULT_NAIVE_PORT="443"
-readonly PREBUILT_CADDY_TAG="v2.11.2-naive"
+readonly PREBUILT_CADDY_TAG="v2.11.7-naive2"
 readonly PREBUILT_CADDY_URL="https://github.com/klzgrad/forwardproxy/releases/download/${PREBUILT_CADDY_TAG}/caddy-forwardproxy-naive.tar.xz"
-readonly PREBUILT_CADDY_SHA256="19eccb7321dd877a5fb4a3dba6ef1b745185188b616c96cc6201f1a1fc0380a8"
-readonly CADDY_CORE_VERSION="v2.11.2"
-readonly GO_VERSION="go1.26.4"
-readonly GO_LINUX_AMD64_SHA256="1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f"
-readonly GO_LINUX_ARM64_SHA256="ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768"
-readonly XCADDY_MODULE="github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.6"
-# Pseudo-version of the commit tagged v2.11.2-naive (d62c80d3dd2c). The tag itself
-# cannot be used: the fork's go.mod path has no /v2 suffix, so Go rejects any v2.x
-# version in the replace directive ("should be v0 or v1, not v2").
-readonly FORWARDPROXY_MODULE="github.com/klzgrad/forwardproxy@v0.0.0-20250118002110-d62c80d3dd2c"
-readonly CADDY_BIN="/usr/bin/caddy"
-readonly CADDY_DIR="/etc/caddy"
-readonly CADDYFILE="${CADDY_DIR}/Caddyfile"
-readonly CRED_FILE="${CADDY_DIR}/credentials.txt"
-readonly CLIENT_CONFIG="/root/naive-client-config.json"
-readonly SINGBOX_CONFIG="/root/naive-singbox.json"
-readonly SYSTEMD_UNIT="/etc/systemd/system/caddy.service"
-readonly TMP_BUILD_DIR="/root/tmp"
-readonly GO_INSTALL_DIR="/usr/local/go"
-readonly STATE_FILE="${CADDY_DIR}/naivecd-managed.env"
-readonly BACKUP_ROOT="/root/naivecd-backups"
-readonly CADDY_USER="caddy"
-readonly CADDY_GROUP="caddy"
-readonly CADDY_STATE_DIR="/var/lib/caddy"
+readonly PREBUILT_CADDY_SHA256="c273dc07dd79c5919f97639cbdcb559d40ce90475dbd8aac80641b0a8c8065ff"
+readonly CADDY_CORE_VERSION="v2.11.7"
+readonly CADDY_SRC_URL="https://github.com/caddyserver/caddy/archive/refs/tags/${CADDY_CORE_VERSION}.tar.gz"
+readonly CADDY_SRC_SHA256="86e39de5fa0bc433a9cd574a00e7751059903401f3389c61f8937fd0ad0180f5"
+readonly FORWARDPROXY_SRC_URL="https://github.com/klzgrad/forwardproxy/archive/refs/tags/${PREBUILT_CADDY_TAG}.tar.gz"
+readonly FORWARDPROXY_SRC_SHA256="8d50b8a33800cdaf50d1853f0f6cd3844ca2a22e1b04d40b5e5396086301f93a"
+readonly GO_VERSION="go1.26.11"
+readonly MIN_GO_MAJOR=1
+readonly MIN_GO_MINOR=26
+readonly GO_LINUX_AMD64_SHA256="9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec"
+readonly GO_LINUX_ARM64_SHA256="6c2f29b458b5add0835f18b776f69c8881a6d88428f1484a6da55755e620757e"
+readonly XCADDY_MODULE="github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.7"
+
+if [[ "${NAIVECD_LIB_ONLY:-0}" == "1" ]]; then
+    readonly TTY_INPUT="${NAIVECD_TEST_TTY:-/dev/tty}"
+    readonly CADDY_BIN="${NAIVECD_TEST_CADDY_BIN:-${NAIVECD_TEST_ROOT:-}/usr/bin/caddy}"
+    readonly CADDY_DIR="${NAIVECD_TEST_CADDY_DIR:-${NAIVECD_TEST_ROOT:-}/etc/caddy}"
+    readonly CADDYFILE="${CADDY_DIR}/Caddyfile"
+    readonly CRED_FILE="${NAIVECD_TEST_CRED_FILE:-${CADDY_DIR}/credentials.txt}"
+    readonly CLIENT_CONFIG="${NAIVECD_TEST_CLIENT_CONFIG:-${NAIVECD_TEST_ROOT:-}/root/naive-client-config.json}"
+    readonly SINGBOX_CONFIG="${NAIVECD_TEST_SINGBOX_CONFIG:-${NAIVECD_TEST_ROOT:-}/root/naive-singbox.json}"
+    readonly SYSTEMD_UNIT="${NAIVECD_TEST_SYSTEMD_UNIT:-${NAIVECD_TEST_ROOT:-}/etc/systemd/system/caddy.service}"
+    readonly TMP_BUILD_DIR="${NAIVECD_TEST_TMP_BUILD_DIR:-${NAIVECD_TEST_ROOT:-}/root/tmp}"
+    readonly GO_INSTALL_DIR="${NAIVECD_TEST_GO_INSTALL_DIR:-${NAIVECD_TEST_ROOT:-}/usr/local/go}"
+    readonly STATE_FILE="${NAIVECD_TEST_STATE_FILE:-${CADDY_DIR}/naivecd-managed.env}"
+    readonly BACKUP_ROOT="${NAIVECD_TEST_BACKUP_ROOT:-${NAIVECD_TEST_ROOT:-}/root/naivecd-backups}"
+    readonly CADDY_USER="${NAIVECD_TEST_CADDY_USER:-caddy}"
+    readonly CADDY_GROUP="${NAIVECD_TEST_CADDY_GROUP:-caddy}"
+    readonly CADDY_STATE_DIR="${NAIVECD_TEST_CADDY_STATE_DIR:-${NAIVECD_TEST_ROOT:-}/var/lib/caddy}"
+else
+    readonly TTY_INPUT="/dev/tty"
+    readonly CADDY_BIN="/usr/bin/caddy"
+    readonly CADDY_DIR="/etc/caddy"
+    readonly CADDYFILE="${CADDY_DIR}/Caddyfile"
+    readonly CRED_FILE="${CADDY_DIR}/credentials.txt"
+    readonly CLIENT_CONFIG="/root/naive-client-config.json"
+    readonly SINGBOX_CONFIG="/root/naive-singbox.json"
+    readonly SYSTEMD_UNIT="/etc/systemd/system/caddy.service"
+    readonly TMP_BUILD_DIR="/root/tmp"
+    readonly GO_INSTALL_DIR="/usr/local/go"
+    readonly STATE_FILE="${CADDY_DIR}/naivecd-managed.env"
+    readonly BACKUP_ROOT="/root/naivecd-backups"
+    readonly CADDY_USER="caddy"
+    readonly CADDY_GROUP="caddy"
+    readonly CADDY_STATE_DIR="/var/lib/caddy"
+fi
 
 STATE_LOADED=0
 NAIVECD_MANAGED=0
@@ -162,8 +195,13 @@ MANAGED_STATIC_INDEX=0
 MANAGED_GO=0
 MANAGED_CADDY_USER_CREATED=0
 MANAGED_CADDY_GROUP_CREATED=0
+STATE_DOMAIN=""
+STATE_NAIVE_PORT=""
+STATE_COVER_MODE=""
+STATE_MASK_SITE=""
 STATE_STATIC_ROOT=""
 STATE_STATIC_INDEX_SHA256=""
+SERVER_EXTERNAL_IP=""
 BACKUP_SESSION_DIR=""
 BACKUP_QUIET=0
 TRANSACTION_ACTIVE=0
@@ -178,6 +216,8 @@ TRANSACTION_METADATA_VALUES=()
 TRANSACTION_CADDY_DIR_EXISTED=0
 TRANSACTION_CADDY_STATE_DIR_EXISTED=0
 TRANSACTION_STATIC_ROOT_EXISTED=0
+TRANSACTION_PREV_STATIC_ROOT=""
+TRANSACTION_PREV_STATIC_ROOT_EXISTED=0
 TRANSACTION_CREATED_CADDY_USER=0
 TRANSACTION_CREATED_CADDY_GROUP=0
 TRANSACTION_INSTALLED_GO=0
@@ -208,7 +248,12 @@ SYSTEMD_UNIT_CHANGED=1
 #─────────────────────────────────────────────────────────────────────────────
 
 check_root() {
-    [[ $EUID -eq 0 ]] || die "Run as root (try: sudo bash $0)"
+    if [[ $EUID -ne 0 ]]; then
+        if [[ -f "${0:-}" ]]; then
+            die "Run as root (try: sudo bash $0)"
+        fi
+        die "Run as root (for example: ... | sudo bash)"
+    fi
 }
 
 detect_arch() {
@@ -222,16 +267,32 @@ detect_arch() {
 }
 
 detect_os() {
-    [[ -r /etc/os-release ]] || die "Cannot read /etc/os-release; this script supports Debian/Ubuntu only."
-    # Source os-release in subshells so its variables (ID, NAME, VERSION, ...)
+    local os_release="${NAIVECD_TEST_OS_RELEASE:-/etc/os-release}"
+    [[ "${NAIVECD_LIB_ONLY:-0}" == "1" ]] || os_release="/etc/os-release"
+    [[ -r "$os_release" ]] || die "Cannot read ${os_release}; this script supports Debian/Ubuntu only."
+    # Source os-release in subshells so its variables (ID, NAME, VERSION_ID, ...)
     # do not leak into this script's namespace.
-    local os_id os_pretty
-    # shellcheck disable=SC1091
-    os_id="$(. /etc/os-release 2>/dev/null && printf '%s' "${ID:-}" || true)"
-    # shellcheck disable=SC1091
-    os_pretty="$(. /etc/os-release 2>/dev/null && printf '%s' "${PRETTY_NAME:-}" || true)"
+    local os_id os_pretty os_version major
+    # shellcheck disable=SC1090,SC1091
+    os_id="$(. "$os_release" 2>/dev/null && printf '%s' "${ID:-}" || true)"
+    # shellcheck disable=SC1090,SC1091
+    os_pretty="$(. "$os_release" 2>/dev/null && printf '%s' "${PRETTY_NAME:-}" || true)"
+    # shellcheck disable=SC1090,SC1091
+    os_version="$(. "$os_release" 2>/dev/null && printf '%s' "${VERSION_ID:-}" || true)"
+    major="${os_version%%.*}"
     case "$os_id" in
-        debian|ubuntu) ok "Detected ${os_pretty:-$os_id}" ;;
+        debian)
+            if [[ -n "$major" && "$major" =~ ^[0-9]+$ ]] && (( 10#$major < 12 )); then
+                die "Unsupported Debian version: ${os_pretty:-$os_version} (requires Debian 12+)"
+            fi
+            ok "Detected ${os_pretty:-$os_id}"
+            ;;
+        ubuntu)
+            if [[ -n "$major" && "$major" =~ ^[0-9]+$ ]] && (( 10#$major < 22 )); then
+                die "Unsupported Ubuntu version: ${os_pretty:-$os_version} (requires Ubuntu 22.04+)"
+            fi
+            ok "Detected ${os_pretty:-$os_id}"
+            ;;
         *) die "Unsupported OS: ${os_id:-unknown} (supported: debian, ubuntu)" ;;
     esac
 }
@@ -269,6 +330,21 @@ get_external_ipv6() {
     return 1
 }
 
+canonical_ipv6() {
+    local ip="$1" canon=""
+    [[ -n "$ip" ]] || return 1
+    if command -v getent >/dev/null 2>&1; then
+        canon="$(getent ahostsv6 "$ip" 2>/dev/null | awk 'NR==1 {print tolower($1)}' || true)"
+    fi
+    printf '%s' "${canon:-${ip,,}}"
+}
+
+local_global_ipv6s() {
+    command -v ip >/dev/null 2>&1 || return 0
+    ip -6 -o addr show scope global 2>/dev/null \
+        | awk '{sub(/\/.*/, "", $4); if ($4 ~ /:/) print tolower($4)}' || true
+}
+
 resolve_records() {
     # resolve_records A|AAAA <domain> — prints matching records, one per line.
     # Falls back from 1.1.1.1 to the system resolver; prints nothing on failure
@@ -276,12 +352,12 @@ resolve_records() {
     local rrtype="$1" domain="$2" out filter
     case "$rrtype" in
         A)    filter='^[0-9.]+$' ;;
-        AAAA) filter='^[0-9a-fA-F:]+$' ;;
+        AAAA) filter='^[0-9a-fA-F:]*:[0-9a-fA-F:]*$' ;;
         *)    return 1 ;;
     esac
-    out="$(dig +short "$rrtype" "$domain" @1.1.1.1 2>/dev/null)" || out=""
+    out="$(dig +short +time=2 +tries=1 "$rrtype" "$domain" @1.1.1.1 2>/dev/null)" || out=""
     if [[ -z "$out" ]]; then
-        out="$(dig +short "$rrtype" "$domain" 2>/dev/null)" || out=""
+        out="$(dig +short +time=3 +tries=1 "$rrtype" "$domain" 2>/dev/null)" || out=""
     fi
     printf '%s\n' "$out" | grep -E "$filter" || true
 }
@@ -295,6 +371,7 @@ check_dns() {
         warn "Could not detect this server's external IP — skipping DNS check."
         return 0
     fi
+    SERVER_EXTERNAL_IP="$external_ip"
     log "Server external IP: $external_ip"
 
     resolved_ips="$(resolve_records A "$domain")"
@@ -320,10 +397,24 @@ check_dns() {
     # detection from this host is best-effort.
     resolved_v6="$(resolve_records AAAA "$domain")"
     if [[ -n "$resolved_v6" ]]; then
-        local external_ip6=""
+        local host_v6="" external_ip6="" matched_v6="" rec canon_rec
+        host_v6="$(local_global_ipv6s)"
         external_ip6="$(get_external_ipv6 || true)"
-        if [[ -n "$external_ip6" ]] && printf '%s\n' "${resolved_v6,,}" | grep -Fxq "${external_ip6,,}"; then
-            ok "AAAA check passed: $domain → $external_ip6"
+        if [[ -n "$external_ip6" ]]; then
+            external_ip6="$(canonical_ipv6 "$external_ip6" || true)"
+            host_v6="$(printf '%s\n%s\n' "$host_v6" "$external_ip6")"
+        fi
+        while IFS= read -r rec; do
+            [[ -n "$rec" ]] || continue
+            canon_rec="$(canonical_ipv6 "$rec" || true)"
+            if [[ -n "$canon_rec" && -n "$host_v6" ]] \
+                && printf '%s\n' "$host_v6" | grep -Fx "$canon_rec" >/dev/null; then
+                matched_v6="$canon_rec"
+                break
+            fi
+        done <<< "$resolved_v6"
+        if [[ -n "$matched_v6" ]]; then
+            ok "AAAA check passed: $domain → $matched_v6"
         else
             warn "Domain $domain has AAAA record(s) [$(printf '%s' "$resolved_v6" | tr '\n' ' ')] that could not be confirmed to point at this server."
             warn "If IPv6 is misconfigured, ACME validation (which may prefer IPv6) can fail; remove the AAAA record if in doubt."
@@ -334,7 +425,9 @@ check_dns() {
 check_firewall() {
     # Warn-only: a host firewall blocking 80/NAIVE_PORT turns into confusing
     # ACME timeouts later, so surface it before any changes are made.
-    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | head -n1 | grep -q 'Status: active'; then
+    # Avoid `head -n1 | grep -q` under pipefail: ufw is Python and raises
+    # BrokenPipeError if stdout closes early when rules follow the header line.
+    if command -v ufw >/dev/null 2>&1 && [[ "$(ufw status 2>/dev/null || true)" == *"Status: active"* ]]; then
         warn "ufw is active. Make sure TCP ports 80 and ${NAIVE_PORT} are allowed, e.g.:"
         warn "  ufw allow 80/tcp && ufw allow ${NAIVE_PORT}/tcp"
     fi
@@ -345,10 +438,12 @@ check_firewall() {
 }
 
 check_ports() {
-    local port busy_pid busy_proc ports=(80 "$NAIVE_PORT")
+    local port ss_out busy_pid busy_proc ports=(80 "$NAIVE_PORT")
     require_cmd ss
     for port in "${ports[@]}"; do
-        busy_pid="$(ss -tlnpH "sport = :${port}" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -n1 || true)"
+        ss_out="$(ss -tlnpH "sport = :${port}" 2>/dev/null || true)"
+        [[ -n "$ss_out" ]] || continue
+        busy_pid="$(printf '%s\n' "$ss_out" | sed -n '1s/.*pid=\([0-9][0-9]*\).*/\1/p')"
         if [[ -n "$busy_pid" ]]; then
             busy_proc="$(ps -p "$busy_pid" -o comm= 2>/dev/null || echo unknown)"
             warn "Port :$port is occupied by PID $busy_pid ($busy_proc)"
@@ -358,16 +453,22 @@ check_ports() {
             fi
             die "Port :$port is busy. Stop $busy_proc (PID $busy_pid) manually and retry."
         fi
+        die "Port :$port is already in use by another listener (no local PID reported). Free port :$port and retry."
     done
 
     # Caddy also binds UDP :NAIVE_PORT for HTTP/3 (QUIC); a conflict there is
     # not fatal (TCP still serves), so warn instead of dying.
-    local udp_pid udp_proc
-    udp_pid="$(ss -ulnpH "sport = :${NAIVE_PORT}" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -n1 || true)"
-    if [[ -n "$udp_pid" ]]; then
-        udp_proc="$(ps -p "$udp_pid" -o comm= 2>/dev/null || echo unknown)"
-        if [[ "$udp_proc" != "caddy" ]]; then
-            warn "UDP :${NAIVE_PORT} is in use by ${udp_proc} (PID ${udp_pid}); HTTP/3 (QUIC) may be unavailable."
+    local udp_out udp_pid udp_proc
+    udp_out="$(ss -ulnpH "sport = :${NAIVE_PORT}" 2>/dev/null || true)"
+    if [[ -n "$udp_out" ]]; then
+        udp_pid="$(printf '%s\n' "$udp_out" | sed -n '1s/.*pid=\([0-9][0-9]*\).*/\1/p')"
+        if [[ -n "$udp_pid" ]]; then
+            udp_proc="$(ps -p "$udp_pid" -o comm= 2>/dev/null || echo unknown)"
+            if [[ "$udp_proc" != "caddy" ]]; then
+                warn "UDP :${NAIVE_PORT} is in use by ${udp_proc} (PID ${udp_pid}); HTTP/3 (QUIC) may be unavailable."
+            fi
+        else
+            warn "UDP :${NAIVE_PORT} is already in use; HTTP/3 (QUIC) may be unavailable."
         fi
     fi
     ok "Ports 80 and ${NAIVE_PORT} are available"
@@ -388,6 +489,10 @@ reset_managed_state() {
     MANAGED_GO=0
     MANAGED_CADDY_USER_CREATED=0
     MANAGED_CADDY_GROUP_CREATED=0
+    STATE_DOMAIN=""
+    STATE_NAIVE_PORT=""
+    STATE_COVER_MODE=""
+    STATE_MASK_SITE=""
     STATE_STATIC_ROOT=""
     STATE_STATIC_INDEX_SHA256=""
     ORIGIN_CADDY_BIN=""
@@ -422,7 +527,8 @@ load_managed_state() {
             NAIVECD_MANAGED|MANAGED_CADDY_DIR_CREATED|MANAGED_CADDY_BIN|MANAGED_SYSTEMD_UNIT|\
             MANAGED_CADDYFILE|MANAGED_CRED_FILE|MANAGED_CLIENT_CONFIG|MANAGED_SINGBOX_CONFIG|\
             MANAGED_STATIC_ROOT_CREATED|MANAGED_STATIC_INDEX|MANAGED_GO|\
-            MANAGED_CADDY_USER_CREATED|MANAGED_CADDY_GROUP_CREATED|STATE_STATIC_ROOT|\
+            MANAGED_CADDY_USER_CREATED|MANAGED_CADDY_GROUP_CREATED|\
+            STATE_DOMAIN|STATE_NAIVE_PORT|STATE_COVER_MODE|STATE_MASK_SITE|STATE_STATIC_ROOT|\
             STATE_STATIC_INDEX_SHA256|ORIGIN_CADDY_BIN|ORIGIN_SYSTEMD_UNIT|ORIGIN_CADDYFILE|\
             ORIGIN_CRED_FILE|ORIGIN_CLIENT_CONFIG|ORIGIN_SINGBOX_CONFIG|\
             ORIGINAL_CADDY_BIN_BACKUP|ORIGINAL_SYSTEMD_UNIT_BACKUP|ORIGINAL_CADDYFILE_BACKUP|\
@@ -436,7 +542,8 @@ load_managed_state() {
 
     if [[ "$NAIVECD_MANAGED" == "1" ]]; then
         STATE_LOADED=1
-        # 兼容旧状态文件：旧版本只记录“由 naivecd 管理”，无法恢复安装前原件。
+        # Backward compatibility with older state files that only recorded managed
+        # flags without tracking pre-existing originals.
         if [[ -z "$ORIGIN_CADDY_BIN" && "$MANAGED_CADDY_BIN" == "1" ]]; then ORIGIN_CADDY_BIN="created"; fi
         if [[ -z "$ORIGIN_SYSTEMD_UNIT" && "$MANAGED_SYSTEMD_UNIT" == "1" ]]; then ORIGIN_SYSTEMD_UNIT="created"; fi
         if [[ -z "$ORIGIN_CADDYFILE" && "$MANAGED_CADDYFILE" == "1" ]]; then ORIGIN_CADDYFILE="created"; fi
@@ -448,7 +555,9 @@ load_managed_state() {
 
 write_managed_state() {
     mkdir -p "$CADDY_DIR"
-    local tmp="${STATE_FILE}.tmp"
+    local tmp
+    tmp="$(mktemp "${STATE_FILE}.XXXXXX")"
+    register_tmp "$tmp"
     {
         printf '# Managed by naivecd. This file records resources created by the installer.\n'
         printf '# Generated: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -465,6 +574,10 @@ write_managed_state() {
         printf 'MANAGED_GO=%s\n' "$MANAGED_GO"
         printf 'MANAGED_CADDY_USER_CREATED=%s\n' "$MANAGED_CADDY_USER_CREATED"
         printf 'MANAGED_CADDY_GROUP_CREATED=%s\n' "$MANAGED_CADDY_GROUP_CREATED"
+        printf 'STATE_DOMAIN=%s\n' "${STATE_DOMAIN:-}"
+        printf 'STATE_NAIVE_PORT=%s\n' "${STATE_NAIVE_PORT:-}"
+        printf 'STATE_COVER_MODE=%s\n' "${STATE_COVER_MODE:-}"
+        printf 'STATE_MASK_SITE=%s\n' "${STATE_MASK_SITE:-}"
         printf 'STATE_STATIC_ROOT=%s\n' "${STATE_STATIC_ROOT:-}"
         printf 'STATE_STATIC_INDEX_SHA256=%s\n' "${STATE_STATIC_INDEX_SHA256:-}"
         printf 'ORIGIN_CADDY_BIN=%s\n' "$ORIGIN_CADDY_BIN"
@@ -489,7 +602,7 @@ write_managed_state() {
     } > "$tmp"
     chown root:root "$tmp"
     chmod 0600 "$tmp"
-    mv "$tmp" "$STATE_FILE"
+    mv -- "$tmp" "$STATE_FILE"
 }
 
 file_sha256() {
@@ -623,6 +736,22 @@ snapshot_transaction_metadata() {
 
 begin_transaction() {
     (( TRANSACTION_ACTIVE == 0 )) || return 0
+    TRANSACTION_COMMITTED=0
+    TRANSACTION_SERVICE_ACTIVE=0
+    TRANSACTION_SERVICE_ENABLED=0
+    TRANSACTION_PATHS=()
+    TRANSACTION_PATH_EXISTED=()
+    TRANSACTION_METADATA_PATHS=()
+    TRANSACTION_METADATA_VALUES=()
+    TRANSACTION_CADDY_DIR_EXISTED=0
+    TRANSACTION_CADDY_STATE_DIR_EXISTED=0
+    TRANSACTION_STATIC_ROOT_EXISTED=0
+    TRANSACTION_PREV_STATIC_ROOT=""
+    TRANSACTION_PREV_STATIC_ROOT_EXISTED=0
+    TRANSACTION_CREATED_CADDY_USER=0
+    TRANSACTION_CREATED_CADDY_GROUP=0
+    TRANSACTION_INSTALLED_GO=0
+
     ensure_backup_dir
     TRANSACTION_DIR="${BACKUP_SESSION_DIR}/transaction"
     mkdir -p "$TRANSACTION_DIR/files"
@@ -644,6 +773,11 @@ begin_transaction() {
         snapshot_transaction_path "$path"
     done
     [[ -n "$static_index" ]] && snapshot_transaction_path "$static_index"
+    if [[ -n "$STATE_STATIC_ROOT" && "$STATE_STATIC_ROOT" != "${STATIC_ROOT:-}" ]]; then
+        TRANSACTION_PREV_STATIC_ROOT="$STATE_STATIC_ROOT"
+        [[ -d "$STATE_STATIC_ROOT" ]] && TRANSACTION_PREV_STATIC_ROOT_EXISTED=1
+        snapshot_transaction_path "${STATE_STATIC_ROOT}/index.html"
+    fi
     snapshot_transaction_metadata "$CADDY_DIR"
     snapshot_transaction_metadata "$CADDY_STATE_DIR"
     [[ -n "${STATIC_ROOT:-}" ]] && snapshot_transaction_metadata "$STATIC_ROOT"
@@ -695,6 +829,7 @@ rollback_transaction() {
             rm -rf -- "$path"
         fi
     done
+    (( TRANSACTION_PREV_STATIC_ROOT_EXISTED == 1 )) && [[ -n "$TRANSACTION_PREV_STATIC_ROOT" ]] && mkdir -p "$TRANSACTION_PREV_STATIC_ROOT" 2>/dev/null || true
     for ((i=0; i<${#TRANSACTION_METADATA_PATHS[@]}; i++)); do
         restore_metadata "${TRANSACTION_METADATA_PATHS[$i]}" "${TRANSACTION_METADATA_VALUES[$i]}"
     done
@@ -876,6 +1011,16 @@ uninstall_caddy_naive() {
     if [[ "$MANAGED_CADDY_DIR_CREATED" != "1" ]]; then
         restore_metadata "$CADDY_DIR" "$STATE_CADDY_DIR_METADATA"
     fi
+
+    # Reclaim ownership of preserved directories before deleting the managed
+    # caddy user/group so TLS private keys and preserved files are never left
+    # owned by an unallocated numeric UID/GID that another package may reuse.
+    if [[ -d "$CADDY_STATE_DIR" ]] && [[ "$MANAGED_CADDY_USER_CREATED" == "1" || "$MANAGED_CADDY_GROUP_CREATED" == "1" ]]; then
+        chown -Rh root:root -- "$CADDY_STATE_DIR"
+        if [[ -z "$STATE_CADDY_STATE_DIR_METADATA" ]]; then
+            chmod 0700 -- "$CADDY_STATE_DIR"
+        fi
+    fi
     restore_metadata "$CADDY_STATE_DIR" "$STATE_CADDY_STATE_DIR_METADATA"
 
     remove_managed_file "$STATE_FILE"
@@ -885,17 +1030,26 @@ uninstall_caddy_naive() {
             ok "Removed empty managed Caddy config directory ${CADDY_DIR}"
         else
             warn "Preserving ${CADDY_DIR}; it is not empty."
+            [[ "$MANAGED_CADDY_GROUP_CREATED" == "1" ]] && chgrp -h root -- "$CADDY_DIR"
+        fi
+    fi
+    if [[ "$MANAGED_STATIC_ROOT_CREATED" == "1" && -n "$static_root_to_review" && -d "$static_root_to_review" ]]; then
+        if [[ "$MANAGED_CADDY_GROUP_CREATED" == "1" ]]; then
+            chgrp -h root -- "$static_root_to_review"
+            [[ -e "${static_root_to_review}/index.html" ]] && chgrp -h root -- "${static_root_to_review}/index.html"
         fi
     fi
 
     if [[ "$unit_managed" == "1" ]]; then
         systemctl daemon-reload
         systemctl reset-failed caddy.service >/dev/null 2>&1 || true
-        if [[ "$ORIGINAL_SERVICE_ENABLED" == "1" && "$ORIGIN_SYSTEMD_UNIT" == "replaced" ]]; then
-            systemctl enable caddy >/dev/null 2>&1 || warn "Could not re-enable the original caddy.service."
-        fi
-        if [[ "$ORIGINAL_SERVICE_ACTIVE" == "1" && "$ORIGIN_SYSTEMD_UNIT" == "replaced" ]]; then
-            systemctl start caddy >/dev/null 2>&1 || warn "Could not restart the original caddy.service."
+        if has_caddy_unit && [[ -x "$CADDY_BIN" ]]; then
+            if [[ "$ORIGINAL_SERVICE_ENABLED" == "1" ]]; then
+                systemctl enable caddy >/dev/null 2>&1 || warn "Could not re-enable the original caddy.service."
+            fi
+            if [[ "$ORIGINAL_SERVICE_ACTIVE" == "1" ]]; then
+                systemctl start caddy >/dev/null 2>&1 || warn "Could not restart the original caddy.service."
+            fi
         fi
     fi
 
@@ -967,8 +1121,9 @@ handle_existing_caddy() {
         prompt="Enter choice [1-4]: "
     fi
 
+    ensure_tty_readable
     while true; do
-        read -r -p "$prompt" choice </dev/tty \
+        read -r -p "$prompt" choice <"$TTY_INPUT" \
             || die "No input available; run the installer in an interactive terminal."
         case "$choice" in
             1) MODE="rebuild";     return 0 ;;
@@ -1017,13 +1172,15 @@ normalize_cover_mode() {
 }
 
 choose_cover_mode() {
-    local choice mode
+    local default_mode="${1:-static}" default_choice="1" choice mode
+    [[ "$default_mode" == "proxy" ]] && default_choice="2"
     echo "Choose cover mode:" >&2
     echo "  1) Local static site (served from ${DEFAULT_STATIC_ROOT})" >&2
     echo "  2) Reverse proxy a cover site" >&2
+    ensure_tty_readable
     while true; do
-        read -r -p "Enter 1 or 2 [1]: " choice </dev/tty || return 1
-        choice="${choice:-1}"
+        read -r -p "Enter 1 or 2 [${default_choice}]: " choice <"$TTY_INPUT" || return 1
+        choice="${choice:-$default_choice}"
         if mode="$(normalize_cover_mode "$choice")"; then
             printf '%s' "$mode"
             return 0
@@ -1035,9 +1192,20 @@ choose_cover_mode() {
 validate_mask_site() {
     # Caddy's reverse_proxy upstream accepts only scheme://host[:port] — no path,
     # query, fragment, whitespace, or trailing slash. Strip anything past the host[:port].
-    local mask_clean
+    local mask_clean authority port_part=""
     mask_clean="$(printf '%s' "$MASK_SITE" | sed -E 's|^(https?://[^[:space:]/?#]+).*$|\1|')"
-    [[ "$mask_clean" =~ ^https?://[^[:space:]/?#]+$ ]] || die "Mask site must start with http:// or https:// and contain a host: $MASK_SITE"
+    [[ "$mask_clean" =~ ^https?://([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:]*:[0-9A-Fa-f:]+\])(:([0-9]+))?$ ]] \
+        || die "Mask site must be a valid http(s)://host[:port] URL: $MASK_SITE"
+    authority="${mask_clean#*://}"
+    if [[ "$authority" == *"]:"* ]]; then
+        port_part="${authority##*]:}"
+    elif [[ "$authority" != "["* && "$authority" == *:* ]]; then
+        port_part="${authority##*:}"
+    fi
+    if [[ -n "$port_part" ]]; then
+        (( ${#port_part} <= 5 && 10#$port_part >= 1 && 10#$port_part <= 65535 )) \
+            || die "Mask site port out of range (1-65535): $MASK_SITE"
+    fi
     if [[ "$mask_clean" != "$MASK_SITE" ]]; then
         log "Stripped path/slash from mask site: $MASK_SITE → $mask_clean"
         MASK_SITE="$mask_clean"
@@ -1050,27 +1218,78 @@ validate_static_root() {
         || die "Static site root must be an absolute path: $STATIC_ROOT"
     [[ "$STATIC_ROOT" != *[[:space:]]* ]] \
         || die "Static site root must not contain whitespace: $STATIC_ROOT"
+    [[ "$STATIC_ROOT" =~ ^/[A-Za-z0-9._/-]+$ ]] \
+        || die "Static site root contains unsupported characters: $STATIC_ROOT"
     STATIC_ROOT="$(realpath -m -- "$STATIC_ROOT")"
-    [[ "$STATIC_ROOT" == /var/www/* || "$STATIC_ROOT" == /srv/* ]] \
+    local allowed_root=0
+    if [[ "$STATIC_ROOT" == /var/www/* || "$STATIC_ROOT" == /srv/* ]]; then
+        allowed_root=1
+    elif [[ "${NAIVECD_LIB_ONLY:-0}" == "1" && -n "${NAIVECD_TEST_ROOT:-}" ]] \
+        && [[ "$STATIC_ROOT" == "${NAIVECD_TEST_ROOT}/var/www/"* || "$STATIC_ROOT" == "${NAIVECD_TEST_ROOT}/srv/"* ]]; then
+        allowed_root=1
+    fi
+    (( allowed_root == 1 )) \
         || die "Static site root must resolve under /var/www/ or /srv/: $STATIC_ROOT"
+    [[ "$STATIC_ROOT" =~ ^/[A-Za-z0-9._/-]+$ ]] \
+        || die "Resolved static site root contains unsupported characters: $STATIC_ROOT"
 }
 
 validate_naive_port() {
     [[ "$NAIVE_PORT" =~ ^[0-9]+$ ]] \
         || die "Invalid NAIVE_PORT: $NAIVE_PORT (expected an integer port)"
-    (( NAIVE_PORT >= 1 && NAIVE_PORT <= 65535 )) \
+    (( 10#$NAIVE_PORT >= 1 && 10#$NAIVE_PORT <= 65535 )) \
         || die "Invalid NAIVE_PORT: $NAIVE_PORT (expected 1-65535)"
-    [[ "$NAIVE_PORT" != "80" ]] \
+    (( 10#$NAIVE_PORT != 80 )) \
         || die "NAIVE_PORT must not be 80 because port 80 is reserved for ACME HTTP validation"
+    NAIVE_PORT="$(( 10#$NAIVE_PORT ))"
+}
+
+load_previous_config_defaults() {
+    PREV_DOMAIN="${STATE_DOMAIN:-}"
+    PREV_PORT="${STATE_NAIVE_PORT:-}"
+    PREV_COVER_MODE="${STATE_COVER_MODE:-}"
+    PREV_STATIC_ROOT="${STATE_STATIC_ROOT:-}"
+    PREV_MASK_SITE="${STATE_MASK_SITE:-}"
+
+    [[ -r "$CRED_FILE" ]] || return 0
+    if [[ -z "$PREV_DOMAIN" ]]; then
+        PREV_DOMAIN="$(awk '/^# Domain:[[:space:]]+/ {print $3; exit}' "$CRED_FILE" || true)"
+    fi
+    if [[ -z "$PREV_PORT" ]]; then
+        PREV_PORT="$(awk '/^# Port:[[:space:]]+/ {print $3; exit}' "$CRED_FILE" || true)"
+    fi
+    if [[ -z "$PREV_COVER_MODE" ]]; then
+        PREV_COVER_MODE="$(awk '/^# Cover mode:[[:space:]]+/ {print $4; exit}' "$CRED_FILE" || true)"
+    fi
+    if [[ -z "$PREV_STATIC_ROOT" ]]; then
+        PREV_STATIC_ROOT="$(awk '/^# Static root:[[:space:]]+/ {print $4; exit}' "$CRED_FILE" || true)"
+    fi
+    if [[ -z "$PREV_MASK_SITE" ]]; then
+        PREV_MASK_SITE="$(awk '/^# Mask site:[[:space:]]+/ {print $4; exit}' "$CRED_FILE" || true)"
+    fi
 }
 
 gather_inputs() {
-    # Populates globals: DOMAIN, COVER_MODE, MASK_SITE or STATIC_ROOT
+    # Populates globals: DOMAIN, NAIVE_PORT, COVER_MODE, MASK_SITE or STATIC_ROOT
+    local default_domain="" default_port="$DEFAULT_NAIVE_PORT" default_cover="static"
+    local default_static="$DEFAULT_STATIC_ROOT" default_mask="$DEFAULT_MASK_SITE"
+    if [[ "${MODE:-}" == "reconfigure" ]]; then
+        load_previous_config_defaults
+        [[ -n "${PREV_DOMAIN:-}" ]] && default_domain="$PREV_DOMAIN"
+        [[ -n "${PREV_PORT:-}" ]] && default_port="$PREV_PORT"
+        if [[ -n "${PREV_COVER_MODE:-}" ]] && normalize_cover_mode "$PREV_COVER_MODE" >/dev/null 2>&1; then
+            default_cover="$(normalize_cover_mode "$PREV_COVER_MODE")"
+        fi
+        [[ -n "${PREV_STATIC_ROOT:-}" ]] && default_static="$PREV_STATIC_ROOT"
+        [[ -n "${PREV_MASK_SITE:-}" ]] && default_mask="$PREV_MASK_SITE"
+    fi
+
     if [[ -n "${NAIVE_DOMAIN:-}" ]]; then
         DOMAIN="$NAIVE_DOMAIN"
         log "Domain from env: $DOMAIN"
     else
-        DOMAIN="$(prompt_value 'Domain for NaiveProxy (DNS-only, points to this server)')"
+        DOMAIN="$(prompt_value 'Domain for NaiveProxy (DNS-only, points to this server)' "$default_domain")" \
+            || die "Aborted: interactive input closed."
     fi
 
     [[ "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] \
@@ -1079,7 +1298,8 @@ gather_inputs() {
     if [[ -n "${NAIVE_PORT:-}" ]]; then
         log "NaiveProxy HTTPS port from env: $NAIVE_PORT"
     else
-        NAIVE_PORT="$(prompt_value 'NaiveProxy HTTPS port' "$DEFAULT_NAIVE_PORT")"
+        NAIVE_PORT="$(prompt_value 'NaiveProxy HTTPS port' "$default_port")" \
+            || die "Aborted: interactive input closed."
     fi
     validate_naive_port
 
@@ -1088,7 +1308,8 @@ gather_inputs() {
             || die "Invalid NAIVE_COVER_MODE: $NAIVE_COVER_MODE (expected static or proxy)"
         log "Cover mode from env: $COVER_MODE"
     else
-        COVER_MODE="$(choose_cover_mode)"
+        COVER_MODE="$(choose_cover_mode "$default_cover")" \
+            || die "Aborted: interactive input closed."
     fi
 
     case "$COVER_MODE" in
@@ -1097,7 +1318,8 @@ gather_inputs() {
                 STATIC_ROOT="$NAIVE_STATIC_ROOT"
                 log "Static site root from env: $STATIC_ROOT"
             else
-                STATIC_ROOT="$(prompt_value 'Static site root' "$DEFAULT_STATIC_ROOT")"
+                STATIC_ROOT="$(prompt_value 'Static site root' "$default_static")" \
+                    || die "Aborted: interactive input closed."
             fi
             validate_static_root
             ;;
@@ -1106,7 +1328,8 @@ gather_inputs() {
                 MASK_SITE="$NAIVE_MASK_SITE"
                 log "Mask site from env: $MASK_SITE"
             else
-                MASK_SITE="$(prompt_value 'Cover site URL to reverse proxy' "$DEFAULT_MASK_SITE")"
+                MASK_SITE="$(prompt_value 'Cover site URL to reverse proxy' "$default_mask")" \
+                    || die "Aborted: interactive input closed."
             fi
             validate_mask_site
             ;;
@@ -1118,7 +1341,7 @@ gather_inputs() {
 #─────────────────────────────────────────────────────────────────────────────
 
 install_dependencies() {
-    local pkgs=(curl wget ca-certificates dnsutils iproute2 procps openssl tar xz-utils qrencode)
+    local pkgs=(curl wget ca-certificates dnsutils iproute2 procps openssl tar xz-utils patch qrencode)
     local missing=()
     for pkg in "${pkgs[@]}"; do
         if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q '^install ok installed$'; then
@@ -1165,7 +1388,7 @@ ensure_caddy_account() {
         MANAGED_CADDY_USER_CREATED=1
         ok "Created system user: ${CADDY_USER}"
     else
-        if ! id -nG "$CADDY_USER" | tr ' ' '\n' | grep -Fxq "$CADDY_GROUP"; then
+        if ! id -nG "$CADDY_USER" | tr ' ' '\n' | grep -Fx "$CADDY_GROUP" >/dev/null; then
             usermod -a -G "$CADDY_GROUP" "$CADDY_USER"
             ok "Added ${CADDY_USER} to group ${CADDY_GROUP}"
         else
@@ -1174,9 +1397,24 @@ ensure_caddy_account() {
     fi
 
     mkdir -p "$CADDY_STATE_DIR"
-    chown "$CADDY_USER:$CADDY_GROUP" "$CADDY_STATE_DIR"
-    chmod 0750 "$CADDY_STATE_DIR"
+    # Recursive + no-dereference: ensures preserved TLS state directories stay
+    # accessible if UID/GID changed across uninstall/reinstall without following
+    # symlinks inside a service-writable directory.
+    chown -Rh "$CADDY_USER:$CADDY_GROUP" -- "$CADDY_STATE_DIR"
+    chmod 0750 -- "$CADDY_STATE_DIR"
     ok "Caddy state directory ready: ${CADDY_STATE_DIR}"
+}
+
+go_version_at_least() {
+    # Parses `go version` output (e.g. "go version go1.26.11 linux/amd64") and
+    # checks against $2.$3 (defaults to MIN_GO_MAJOR.MIN_GO_MINOR).
+    local version_str="$1" req_major="${2:-$MIN_GO_MAJOR}" req_minor="${3:-$MIN_GO_MINOR}"
+    if [[ "$version_str" =~ go([0-9]+)\.([0-9]+) ]]; then
+        local major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}"
+        (( 10#$major > 10#$req_major || (10#$major == 10#$req_major && 10#$minor >= 10#$req_minor) ))
+        return $?
+    fi
+    return 1
 }
 
 install_go() {
@@ -1185,8 +1423,10 @@ install_go() {
         current="$("${GO_INSTALL_DIR}/bin/go" version)"
         if [[ "$current" == *" ${GO_VERSION} "* ]]; then
             ok "Using existing Go installation: ${current}"
+        elif go_version_at_least "$current"; then
+            ok "Using existing Go installation: ${current}"
         else
-            warn "Using existing Go installation: ${current}; the installer will not replace ${GO_INSTALL_DIR} automatically."
+            warn "Existing ${GO_INSTALL_DIR} has older ${current} (Caddy ${CADDY_CORE_VERSION} requires Go >= ${MIN_GO_MAJOR}.${MIN_GO_MINOR}); the installer will not replace ${GO_INSTALL_DIR} automatically."
         fi
         export PATH="${GO_INSTALL_DIR}/bin:$PATH"
         return 0
@@ -1199,13 +1439,12 @@ install_go() {
     local go_bin
     if go_bin="$(type -P go)" && [[ -n "$go_bin" ]]; then
         local current
-        current="$(go version)"
-        if [[ "$current" == *" ${GO_VERSION} "* ]]; then
+        current="$("$go_bin" version)"
+        if go_version_at_least "$current"; then
             ok "Using existing Go installation from ${go_bin}: ${current}"
-        else
-            warn "Using existing Go installation from ${go_bin}: ${current}; the installer will not install pinned ${GO_VERSION} automatically."
+            return 0
         fi
-        return 0
+        warn "System Go at ${go_bin} (${current}) is older than Go ${MIN_GO_MAJOR}.${MIN_GO_MINOR}; installing pinned ${GO_VERSION} to ${GO_INSTALL_DIR}."
     fi
 
     local checksum download_dir tarball tarball_path url
@@ -1222,7 +1461,7 @@ install_go() {
     tarball_path="${download_dir}/${tarball}"
     url="https://go.dev/dl/${tarball}"
     log "Downloading $url"
-    if ! wget -q --show-progress -O "$tarball_path" "$url"; then
+    if ! wget -q --show-progress --timeout=30 --tries=3 -O "$tarball_path" "$url"; then
         rm -rf "$download_dir"
         die "Failed to download ${url}"
     fi
@@ -1236,7 +1475,8 @@ install_go() {
     # partial /usr/local/go that neither rollback nor a rerun can handle.
     MANAGED_GO=1
     TRANSACTION_INSTALLED_GO=1
-    tar -C /usr/local -xzf "$tarball_path"
+    mkdir -p "$(dirname "$GO_INSTALL_DIR")"
+    tar -C "$(dirname "$GO_INSTALL_DIR")" -xzf "$tarball_path"
     rm -rf "$download_dir"
 
     export PATH="${GO_INSTALL_DIR}/bin:$PATH"
@@ -1246,7 +1486,9 @@ install_go() {
 verify_caddy_forwardproxy() {
     local bin="$1"
     [[ -x "$bin" ]] || return 1
-    "$bin" list-modules 2>/dev/null | grep -Fxq 'http.handlers.forward_proxy'
+    # Avoid `grep -q` under pipefail so `caddy list-modules` cannot receive SIGPIPE
+    # when the match appears before the end of its module list.
+    "$bin" list-modules 2>/dev/null | grep -Fx 'http.handlers.forward_proxy' >/dev/null
 }
 
 require_installed_caddy_forwardproxy() {
@@ -1281,7 +1523,7 @@ download_prebuilt_caddy() {
     register_tmp "$download_dir"
     archive="${download_dir}/caddy-forwardproxy-naive.tar.xz"
 
-    if ! wget -q -O "$archive" "$PREBUILT_CADDY_URL"; then
+    if ! wget -q --timeout=30 --tries=3 -O "$archive" "$PREBUILT_CADDY_URL"; then
         warn "Prebuilt Caddy download failed; falling back to source build."
         rm -rf "$download_dir"
         return 1
@@ -1298,7 +1540,7 @@ download_prebuilt_caddy() {
         return 1
     fi
 
-    extracted_bin="$(find "$download_dir" -type f -name caddy -perm /111 | head -n1)"
+    extracted_bin="$(find "$download_dir" -type f -name caddy -perm /111 -print -quit)"
     if [[ -z "$extracted_bin" ]] || ! verify_caddy_forwardproxy "$extracted_bin"; then
         warn "Downloaded Caddy does not include http.handlers.forward_proxy; falling back to source build."
         rm -rf "$download_dir"
@@ -1306,32 +1548,61 @@ download_prebuilt_caddy() {
     fi
 
     BUILT_CADDY_BIN="${TMP_BUILD_DIR}/caddy.new"
+    register_tmp "$BUILT_CADDY_BIN"
     install -m 0755 "$extracted_bin" "$BUILT_CADDY_BIN"
     rm -rf "$download_dir"
-    ok "Downloaded prebuilt Caddy: $($BUILT_CADDY_BIN version | head -n1)"
+    ok "Downloaded prebuilt Caddy: $("$BUILT_CADDY_BIN" version | sed -n '1p')"
     return 0
 }
 
 build_caddy() {
     log "Preparing build environment..."
+    require_cmd patch
     mkdir -p "$TMP_BUILD_DIR"
     export TMPDIR="$TMP_BUILD_DIR"
     export GOPATH="${GOPATH:-/root/go}"
-    export PATH="${GOPATH}/bin:${GO_INSTALL_DIR}/bin:$PATH"
+    export PATH="${GO_INSTALL_DIR}/bin:$PATH"
 
-    log "Installing ${XCADDY_MODULE}..."
-    go install "$XCADDY_MODULE"
-
-    log "Building Caddy ${CADDY_CORE_VERSION} with ${FORWARDPROXY_MODULE} (this takes a few minutes)..."
-    local build_dir
+    local build_dir tool_bin caddy_tar fp_tar caddy_src fp_src
     build_dir="$(mktemp -d -p "$TMP_BUILD_DIR" caddy-build.XXXXXX)"
     register_tmp "$build_dir"
+    tool_bin="${build_dir}/bin"
+    caddy_tar="${build_dir}/caddy-src.tar.gz"
+    fp_tar="${build_dir}/forwardproxy-src.tar.gz"
+    caddy_src="${build_dir}/caddy-src"
+    fp_src="${build_dir}/forwardproxy-src"
+    mkdir -p "$tool_bin" "$caddy_src" "$fp_src"
+
+    log "Downloading pinned Caddy ${CADDY_CORE_VERSION} and forwardproxy ${PREBUILT_CADDY_TAG} sources..."
+    wget -q --timeout=30 --tries=3 -O "$caddy_tar" "$CADDY_SRC_URL" \
+        || die "Failed to download ${CADDY_SRC_URL}"
+    verify_sha256 "$caddy_tar" "$CADDY_SRC_SHA256" "Caddy ${CADDY_CORE_VERSION} source archive" \
+        || die "Refusing to extract Caddy source archive after checksum failure."
+
+    wget -q --timeout=30 --tries=3 -O "$fp_tar" "$FORWARDPROXY_SRC_URL" \
+        || die "Failed to download ${FORWARDPROXY_SRC_URL}"
+    verify_sha256 "$fp_tar" "$FORWARDPROXY_SRC_SHA256" "forwardproxy ${PREBUILT_CADDY_TAG} source archive" \
+        || die "Refusing to extract forwardproxy source archive after checksum failure."
+
+    tar -C "$caddy_src" --strip-components=1 -xzf "$caddy_tar"
+    tar -C "$fp_src" --strip-components=1 -xzf "$fp_tar"
+
+    log "Applying upstream NaiveProxy Caddy patches (sing-quic BBRv1 & idle-timeout override)..."
+    patch -d "$caddy_src" -p1 --batch --forward < "${fp_src}/caddy-sing-quic-bbrv1.patch" >/dev/null
+    patch -d "$caddy_src" -p1 --batch --forward < "${fp_src}/caddy-read-idle-timeout.patch" >/dev/null
+
+    log "Installing ${XCADDY_MODULE}..."
+    GOBIN="$tool_bin" go install "$XCADDY_MODULE"
+
+    log "Building Caddy ${CADDY_CORE_VERSION} with forwardproxy ${PREBUILT_CADDY_TAG} (this takes a few minutes)..."
     pushd "$build_dir" >/dev/null
-    "${GOPATH}/bin/xcaddy" build "$CADDY_CORE_VERSION" \
-        --with "github.com/caddyserver/forwardproxy=${FORWARDPROXY_MODULE}"
+    "${tool_bin}/xcaddy" build "$CADDY_CORE_VERSION" \
+        --replace "github.com/caddyserver/caddy/v2=${caddy_src}" \
+        --with "github.com/caddyserver/forwardproxy=${fp_src}"
     [[ -x ./caddy ]] || die "xcaddy build failed: ./caddy not produced"
     verify_caddy_forwardproxy ./caddy || die "built Caddy is missing http.handlers.forward_proxy"
     BUILT_CADDY_BIN="${TMP_BUILD_DIR}/caddy.new"
+    register_tmp "$BUILT_CADDY_BIN"
     install -m 0755 ./caddy "$BUILT_CADDY_BIN"
     popd >/dev/null
     rm -rf "$build_dir"
@@ -1349,6 +1620,11 @@ prepare_caddy_binary() {
 
 install_caddy_binary() {
     log "Installing Caddy binary to ${CADDY_BIN}..."
+    if command -v dpkg-query >/dev/null 2>&1 \
+        && [[ "$(dpkg-query -W -f='${Status}' caddy 2>/dev/null || true)" == "install ok installed" ]]; then
+        warn "An apt 'caddy' package is installed; 'apt upgrade' or unattended-upgrades may overwrite ${CADDY_BIN} with a build lacking forward_proxy."
+        warn "Consider holding the package: apt-mark hold caddy"
+    fi
     record_resource_origin ORIGIN_CADDY_BIN ORIGINAL_CADDY_BIN_BACKUP "$CADDY_BIN"
     if systemctl is-active --quiet caddy 2>/dev/null; then
         log "Stopping running caddy.service before binary swap..."
@@ -1361,7 +1637,7 @@ install_caddy_binary() {
         "Retry reinstall/source build with a Naive-capable Caddy."
     rm -f "$BUILT_CADDY_BIN"
     MANAGED_CADDY_BIN=1
-    ok "Installed: $($CADDY_BIN version | head -n1)"
+    ok "Installed: $("$CADDY_BIN" version | sed -n '1p')"
 }
 
 random_alnum() {
@@ -1402,25 +1678,67 @@ generate_credentials() {
     ok "Credentials generated"
 }
 
+cleanup_previous_static_site() {
+    [[ -n "$STATE_STATIC_ROOT" ]] || return 0
+    local prev_root="$STATE_STATIC_ROOT" prev_index="${STATE_STATIC_ROOT}/index.html"
+    if [[ "$MANAGED_STATIC_INDEX" == "1" && -f "$prev_index" ]]; then
+        if [[ -n "$STATE_STATIC_INDEX_SHA256" && "$(file_sha256 "$prev_index")" == "$STATE_STATIC_INDEX_SHA256" ]]; then
+            backup_path "$prev_index" "before removing superseded cover page"
+            rm -f -- "$prev_index"
+            ok "Removed superseded managed cover page ${prev_index}"
+        else
+            warn "Preserving modified cover page from previous configuration: ${prev_index}"
+        fi
+    fi
+    if [[ "$MANAGED_STATIC_ROOT_CREATED" == "1" && -d "$prev_root" ]]; then
+        if rmdir "$prev_root" 2>/dev/null; then
+            ok "Removed empty previous static root ${prev_root}"
+        else
+            warn "Preserving non-empty previous static root ${prev_root}"
+        fi
+    elif [[ "$MANAGED_STATIC_ROOT_CREATED" != "1" ]]; then
+        restore_metadata "$prev_root" "$STATE_STATIC_ROOT_METADATA"
+        if [[ "$MANAGED_STATIC_INDEX" != "1" ]]; then
+            restore_metadata "$prev_index" "$STATE_STATIC_INDEX_METADATA"
+        fi
+    fi
+    MANAGED_STATIC_ROOT_CREATED=0
+    MANAGED_STATIC_INDEX=0
+    STATE_STATIC_ROOT=""
+    STATE_STATIC_INDEX_SHA256=""
+    STATE_STATIC_ROOT_METADATA=""
+    STATE_STATIC_INDEX_METADATA=""
+}
+
+warn_untraversable_ancestors() {
+    local dir
+    dir="$(dirname "$1")"
+    while [[ "$dir" != "/" && "$dir" != "." && "$dir" != "/var" && "$dir" != "/srv" && "$dir" != "${NAIVECD_TEST_ROOT:-}" ]]; do
+        if [[ -d "$dir" ]]; then
+            local mode grp
+            mode="$(stat -c '%a' -- "$dir" 2>/dev/null || echo 755)"
+            grp="$(stat -c '%G' -- "$dir" 2>/dev/null || echo "")"
+            if (( (8#$mode & 8#001) == 0 )) && ! { [[ "$grp" == "$CADDY_GROUP" ]] && (( (8#$mode & 8#010) != 0 )); }; then
+                warn "Parent directory ${dir} (mode ${mode}) may prevent user '${CADDY_USER}' from traversing to ${1}."
+            fi
+        fi
+        [[ "$dir" == "/var/www" ]] && break
+        dir="$(dirname "$dir")"
+    done
+}
+
 write_static_cover_site() {
-    [[ "$COVER_MODE" == "static" ]] || return 0
+    if [[ "$COVER_MODE" != "static" ]]; then
+        cleanup_previous_static_site
+        return 0
+    fi
     local public_origin="https://${DOMAIN}"
     log "Preparing local static cover site at ${STATIC_ROOT}..."
     if [[ "$NAIVE_PORT" != "443" ]]; then
         public_origin="https://${DOMAIN}:${NAIVE_PORT}"
     fi
     if [[ -n "$STATE_STATIC_ROOT" && "$STATE_STATIC_ROOT" != "$STATIC_ROOT" ]]; then
-        restore_metadata "$STATE_STATIC_ROOT" "$STATE_STATIC_ROOT_METADATA"
-        if [[ "$MANAGED_STATIC_INDEX" != "1" ]]; then
-            restore_metadata "${STATE_STATIC_ROOT}/index.html" "$STATE_STATIC_INDEX_METADATA"
-        elif [[ -f "${STATE_STATIC_ROOT}/index.html" ]]; then
-            warn "Cover page from the previous install remains at ${STATE_STATIC_ROOT}/index.html; remove it manually if unneeded."
-        fi
-        MANAGED_STATIC_ROOT_CREATED=0
-        MANAGED_STATIC_INDEX=0
-        STATE_STATIC_INDEX_SHA256=""
-        STATE_STATIC_ROOT_METADATA=""
-        STATE_STATIC_INDEX_METADATA=""
+        cleanup_previous_static_site
     fi
     if [[ ! -d "$STATIC_ROOT" ]]; then
         MANAGED_STATIC_ROOT_CREATED=1
@@ -1436,6 +1754,7 @@ write_static_cover_site() {
     if [[ "$MANAGED_STATIC_ROOT_CREATED" == "1" ]]; then
         chmod 0755 "$STATIC_ROOT"
     fi
+    warn_untraversable_ancestors "$STATIC_ROOT"
     # If the existing page is one we generated and the user never touched it
     # (checksum matches the managed state), regenerate it so the embedded
     # origin follows a domain/port change. User-modified pages are preserved.
@@ -1446,7 +1765,10 @@ write_static_cover_site() {
         log "Managed cover page is unmodified; regenerating it for the current settings."
     fi
     if [[ ! -e "${STATIC_ROOT}/index.html" || "$regen_managed" == "1" ]]; then
-        cat > "${STATIC_ROOT}/index.html" <<EOF
+        local index_tmp
+        index_tmp="$(mktemp "${STATIC_ROOT}/index.html.XXXXXX")"
+        register_tmp "$index_tmp"
+        cat > "$index_tmp" <<EOF
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1695,8 +2017,9 @@ write_static_cover_site() {
 </body>
 </html>
 EOF
-        chmod 0644 "${STATIC_ROOT}/index.html"
-        chgrp "$CADDY_GROUP" "${STATIC_ROOT}/index.html"
+        chmod 0644 "$index_tmp"
+        chgrp "$CADDY_GROUP" "$index_tmp"
+        mv -- "$index_tmp" "${STATIC_ROOT}/index.html"
         MANAGED_STATIC_INDEX=1
         STATE_STATIC_ROOT="$STATIC_ROOT"
         STATE_STATIC_INDEX_SHA256="$(file_sha256 "${STATIC_ROOT}/index.html")"
@@ -1750,7 +2073,9 @@ EOF
         cat >> "$tmp" <<EOF
   reverse_proxy ${MASK_SITE} {
     header_up Host {upstream_hostport}
-    header_up X-Forwarded-Host {host}
+    header_up -X-Forwarded-For
+    header_up -X-Forwarded-Host
+    header_up -X-Forwarded-Proto
   }
 EOF
     fi
@@ -1777,14 +2102,23 @@ EOF
     ok "Caddy configuration is valid"
     record_resource_origin ORIGIN_CADDYFILE ORIGINAL_CADDYFILE_BACKUP "$CADDYFILE"
     backup_path "$CADDYFILE" "before Caddyfile replacement"
-    mv "$tmp" "$CADDYFILE"
+    mv -- "$tmp" "$CADDYFILE"
     MANAGED_CADDYFILE=1
+    STATE_DOMAIN="$DOMAIN"
+    STATE_NAIVE_PORT="$NAIVE_PORT"
+    STATE_COVER_MODE="$COVER_MODE"
+    if [[ "$COVER_MODE" == "proxy" ]]; then
+        STATE_MASK_SITE="$MASK_SITE"
+    else
+        STATE_MASK_SITE=""
+    fi
     ok "Caddyfile written"
 }
 
 
 write_systemd_unit() {
     log "Writing ${SYSTEMD_UNIT}..."
+    mkdir -p "$(dirname "$SYSTEMD_UNIT")"
     local tmp
     tmp="$(mktemp "${SYSTEMD_UNIT}.XXXXXX")"
     register_tmp "$tmp"
@@ -1872,6 +2206,7 @@ start_caddy() {
 wait_for_caddy_active() {
     log "Waiting for Caddy to become active and obtain TLS certificate..."
     local deadline=$(( SECONDS + 180 ))
+    local show_out sub_state exec_status k v
     while (( SECONDS < deadline )); do
         if systemctl is-active --quiet caddy; then
             # Systemd reports active even before ACME finishes — probe TLS to confirm
@@ -1888,6 +2223,23 @@ wait_for_caddy_active() {
             err "caddy.service failed. Last 50 log lines:"
             journalctl -u caddy -n 50 --no-pager >&2
             die "Aborting. Inspect logs above (often: ACME error, port conflict, DNS misconfig)."
+        else
+            # With Restart=always and RestartSec=5s, a crashing Caddy stays in
+            # activating (auto-restart) without hitting StartLimitBurst within 10s.
+            show_out="$(systemctl show -p SubState -p ExecMainStatus caddy 2>/dev/null || true)"
+            sub_state=""
+            exec_status=""
+            while IFS='=' read -r k v; do
+                case "$k" in
+                    SubState)       sub_state="$v" ;;
+                    ExecMainStatus) exec_status="$v" ;;
+                esac
+            done <<< "$show_out"
+            if [[ "$sub_state" == "auto-restart" && -n "$exec_status" && "$exec_status" != "0" ]]; then
+                err "caddy.service is crash-looping (exit status ${exec_status}). Last 50 log lines:"
+                journalctl -u caddy -n 50 --no-pager >&2
+                die "Aborting. Inspect logs above (often: invalid config, ACME error, port conflict, permission error)."
+            fi
         fi
         sleep 2
     done
@@ -1905,7 +2257,13 @@ wait_for_caddy_active() {
 save_credentials_file() {
     record_resource_origin ORIGIN_CRED_FILE ORIGINAL_CRED_FILE_BACKUP "$CRED_FILE"
     backup_path "$CRED_FILE" "before credentials replacement"
-    cat > "$CRED_FILE" <<EOF
+    mkdir -p "$(dirname "$CRED_FILE")"
+    local tmp
+    tmp="$(mktemp "${CRED_FILE}.XXXXXX")"
+    register_tmp "$tmp"
+    chown root:root "$tmp"
+    chmod 0600 "$tmp"
+    cat > "$tmp" <<EOF
 # Managed by naivecd. This file contains generated NaiveProxy credentials.
 # NaiveProxy credentials — generated $(date -Iseconds)
 # Domain:     ${DOMAIN}
@@ -1913,38 +2271,48 @@ save_credentials_file() {
 # Port:       ${NAIVE_PORT}
 EOF
     if [[ "$COVER_MODE" == "static" ]]; then
-        printf '# Static root: %s\n' "$STATIC_ROOT" >> "$CRED_FILE"
+        printf '# Static root: %s\n' "$STATIC_ROOT" >> "$tmp"
     else
-        printf '# Mask site:   %s\n' "$MASK_SITE" >> "$CRED_FILE"
+        printf '# Mask site:   %s\n' "$MASK_SITE" >> "$tmp"
     fi
-    cat >> "$CRED_FILE" <<EOF
+    cat >> "$tmp" <<EOF
 NAIVE_USER='${NAIVE_USER}'
 NAIVE_PASS='${NAIVE_PASS}'
 NAIVE_URL='naive+https://${NAIVE_USER}:${NAIVE_PASS}@${DOMAIN}:${NAIVE_PORT}?padding=1#NaiveProxy'
 EOF
-    chown root:root "$CRED_FILE"
-    chmod 600 "$CRED_FILE"
+    mv -- "$tmp" "$CRED_FILE"
     MANAGED_CRED_FILE=1
 }
 
 write_client_config() {
     record_resource_origin ORIGIN_CLIENT_CONFIG ORIGINAL_CLIENT_CONFIG_BACKUP "$CLIENT_CONFIG"
     backup_path "$CLIENT_CONFIG" "before client config replacement"
-    cat > "$CLIENT_CONFIG" <<EOF
+    mkdir -p "$(dirname "$CLIENT_CONFIG")"
+    local tmp
+    tmp="$(mktemp "${CLIENT_CONFIG}.XXXXXX")"
+    register_tmp "$tmp"
+    chown root:root "$tmp"
+    chmod 0600 "$tmp"
+    cat > "$tmp" <<EOF
 {
   "listen": "socks://127.0.0.1:10808",
   "proxy": "https://${NAIVE_USER}:${NAIVE_PASS}@${DOMAIN}:${NAIVE_PORT}"
 }
 EOF
-    chown root:root "$CLIENT_CONFIG"
-    chmod 600 "$CLIENT_CONFIG"
+    mv -- "$tmp" "$CLIENT_CONFIG"
     MANAGED_CLIENT_CONFIG=1
 }
 
 write_singbox_config() {
     record_resource_origin ORIGIN_SINGBOX_CONFIG ORIGINAL_SINGBOX_CONFIG_BACKUP "$SINGBOX_CONFIG"
     backup_path "$SINGBOX_CONFIG" "before sing-box config replacement"
-    cat > "$SINGBOX_CONFIG" <<EOF
+    mkdir -p "$(dirname "$SINGBOX_CONFIG")"
+    local tmp
+    tmp="$(mktemp "${SINGBOX_CONFIG}.XXXXXX")"
+    register_tmp "$tmp"
+    chown root:root "$tmp"
+    chmod 0600 "$tmp"
+    cat > "$tmp" <<EOF
 {
   "outbounds": [
     {
@@ -1956,18 +2324,13 @@ write_singbox_config() {
       "password": "${NAIVE_PASS}",
       "tls": {
         "enabled": true,
-        "server_name": "${DOMAIN}",
-        "utls": {
-          "enabled": true,
-          "fingerprint": "chrome"
-        }
+        "server_name": "${DOMAIN}"
       }
     }
   ]
 }
 EOF
-    chown root:root "$SINGBOX_CONFIG"
-    chmod 600 "$SINGBOX_CONFIG"
+    mv -- "$tmp" "$SINGBOX_CONFIG"
     MANAGED_SINGBOX_CONFIG=1
 }
 
@@ -2052,10 +2415,12 @@ print_summary() {
     printf '%sURI for SagerNet-family Android clients%s (Exclave, NekoBox, sing-box-for-android via plugin)\n' "$C_BOLD" "$C_RST"
     printf '  %s\n' "$uri"
     echo
-    printf '  QR (scan in Exclave → Add → From QR Code):\n'
-    echo
-    qrencode -t UTF8 -m 2 "$uri" | sed 's/^/    /'
-    echo
+    if command -v qrencode >/dev/null 2>&1; then
+        printf '  QR (scan in Exclave → Add → From QR Code):\n'
+        echo
+        qrencode -t UTF8 -m 2 "$uri" | sed 's/^/    /'
+        echo
+    fi
 
     printf '%ssing-box config%s (for Karing / sing-box-for-android — import as profile):\n' "$C_BOLD" "$C_RST"
     printf '  saved to: %s\n' "$SINGBOX_CONFIG"
@@ -2065,7 +2430,7 @@ print_summary() {
 
     printf '%sFinal check%s — from your client (after launching naive CLI):\n' "$C_BOLD" "$C_RST"
     printf '  curl --socks5-hostname 127.0.0.1:10808 https://ifconfig.me\n'
-    printf '  expected output: %s (this server)\n' "$(get_external_ip 2>/dev/null || echo "<this-server-IP>")"
+    printf '  expected output: %s (this server)\n' "${SERVER_EXTERNAL_IP:-$(get_external_ip 2>/dev/null || echo "<this-server-IP>")}"
     echo
     printf '%sService status%s — manage with:\n' "$C_BOLD" "$C_RST"
     printf '  systemctl status caddy\n'
@@ -2126,10 +2491,10 @@ main() {
     install_dependencies
     check_dns "$DOMAIN"
     check_firewall
+    check_ports
 
     begin_transaction
     ensure_caddy_account
-    check_ports
 
     if [[ "$MODE" == "rebuild" || "$MODE" == "fresh" ]]; then
         prepare_caddy_binary

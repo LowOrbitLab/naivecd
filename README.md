@@ -4,7 +4,7 @@ One-command NaiveProxy + Caddy installer for Debian/Ubuntu VPS.
 
 ## What It Does
 
-- Installs Caddy with `github.com/klzgrad/forwardproxy@v2.11.2-naive`
+- Installs Caddy with `github.com/klzgrad/forwardproxy@v2.11.7-naive2`
 - Configures NaiveProxy over HTTPS with automatic Let's Encrypt certificates
 - Creates a local Static Edge cover page or reverse-proxies a cover site
 - Generates credentials plus Naive CLI and sing-box client config files
@@ -12,12 +12,12 @@ One-command NaiveProxy + Caddy installer for Debian/Ubuntu VPS.
 
 ## Requirements
 
-- Debian 12 or Ubuntu 22.04+
+- Debian 12+ or Ubuntu 22.04+
 - Root access
 - Public IPv4 VPS
 - Domain A record pointing to the VPS
 - Cloudflare proxy disabled / DNS-only
-- Ports `80/tcp` and selected HTTPS port open (`443/tcp` by default)
+- Ports `80/tcp` and selected HTTPS port open (`443/tcp` by default; `UDP` on the same port recommended for HTTP/3 QUIC)
 
 ## Install
 
@@ -27,6 +27,15 @@ wget -qO- https://raw.githubusercontent.com/LowOrbitLab/naivecd/main/install.sh 
 
 The installer asks for confirmation before making changes. For higher assurance,
 download `install.sh`, review it, and run it with root privileges.
+
+Optional environment variables:
+
+- `NAIVE_DOMAIN`: proxy domain (e.g. `cdn.example.com`)
+- `NAIVE_PORT`: HTTPS port (`1-65535`, except `80`; default `443`)
+- `NAIVE_COVER_MODE`: `static` (default) or `proxy`
+- `NAIVE_STATIC_ROOT`: directory for `static` cover mode (default `/var/www/naive-cover`)
+- `NAIVE_MASK_SITE`: upstream `http(s)://` origin for `proxy` cover mode
+- `NAIVE_CADDY_INSTALL`: `auto` (default), `prebuilt` (`amd64` only), or `build`
 
 ## Output Files
 
@@ -58,4 +67,5 @@ under `/root/naivecd-backups/<timestamp>/`.
 - Do not use sensitive paths as the static site root.
 - This script does not configure firewall rules.
 - The default amd64 path uses a pinned prebuilt Caddy archive with SHA256
-  verification; other cases fall back to pinned source-build inputs.
+  verification; other cases fall back to pinned source-build inputs (Caddy core,
+  `klzgrad/forwardproxy` + upstream QUIC/idle-timeout patches, and Go toolchain).

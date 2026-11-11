@@ -1,29 +1,17 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2034  # many globals here are consumed by sourced install.sh functions
+# Integration tests for transactional rollback, signal handling, and managed state persistence.
+# shellcheck disable=SC2034,SC2329  # globals and mocks are consumed by sourced install.sh functions
 
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
-TEST_SCRIPT="${TEST_ROOT}/install-test.sh"
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 
-# 将所有系统路径改写到临时目录，避免测试影响真实系统。
-sed \
-    -e "s|readonly CADDY_BIN=.*|readonly CADDY_BIN=\"${TEST_ROOT}/usr/bin/caddy\"|" \
-    -e "s|readonly CADDY_DIR=.*|readonly CADDY_DIR=\"${TEST_ROOT}/etc/caddy\"|" \
-    -e "s|readonly CLIENT_CONFIG=.*|readonly CLIENT_CONFIG=\"${TEST_ROOT}/root/naive-client-config.json\"|" \
-    -e "s|readonly SINGBOX_CONFIG=.*|readonly SINGBOX_CONFIG=\"${TEST_ROOT}/root/naive-singbox.json\"|" \
-    -e "s|readonly SYSTEMD_UNIT=.*|readonly SYSTEMD_UNIT=\"${TEST_ROOT}/etc/systemd/system/caddy.service\"|" \
-    -e "s|readonly TMP_BUILD_DIR=.*|readonly TMP_BUILD_DIR=\"${TEST_ROOT}/root/tmp\"|" \
-    -e "s|readonly GO_INSTALL_DIR=.*|readonly GO_INSTALL_DIR=\"${TEST_ROOT}/usr/local/go\"|" \
-    -e "s|readonly BACKUP_ROOT=.*|readonly BACKUP_ROOT=\"${TEST_ROOT}/root/backups\"|" \
-    -e "s|readonly CADDY_STATE_DIR=.*|readonly CADDY_STATE_DIR=\"${TEST_ROOT}/var/lib/caddy\"|" \
-    "$PROJECT_ROOT/install.sh" > "$TEST_SCRIPT"
-
 export NAIVECD_LIB_ONLY=1
-# shellcheck disable=SC1090
-source "$TEST_SCRIPT"
+export NAIVECD_TEST_ROOT="$TEST_ROOT"
+# shellcheck disable=SC1091
+source "$PROJECT_ROOT/install.sh"
 
 systemctl() {
     case "${1:-}" in
@@ -62,6 +50,19 @@ rollback_transaction
 [[ "$(stat -c %a "${STATIC_ROOT}/index.html")" == "700" ]]
 [[ "$TRANSACTION_ACTIVE" == "0" ]]
 
+# Verify sequential transactions in the same shell: committing a first transaction
+# must not prevent a subsequent transaction from rolling back cleanly.
+begin_transaction
+printf 'committed-bin' > "$CADDY_BIN"
+commit_transaction
+[[ "$(<"$CADDY_BIN")" == "committed-bin" ]]
+
+begin_transaction
+printf 'aborted-second-tx' > "$CADDY_BIN"
+rollback_transaction
+[[ "$(<"$CADDY_BIN")" == "committed-bin" ]]
+printf 'old-bin' > "$CADDY_BIN"
+
 replaced_path="${TEST_ROOT}/replaced"
 printf 'original' > "$replaced_path"
 ORIGIN_TEST=""
@@ -79,9 +80,22 @@ printf 'managed' > "$created_path"
 restore_owned_resource "$created_path" "$ORIGIN_CREATED" "$BACKUP_CREATED" "created resource"
 [[ ! -e "$created_path" ]]
 
-# 验证 TERM 会退出进程，并在退出前恢复事务快照。
-if NAIVECD_LIB_ONLY=1 TEST_SCRIPT="$TEST_SCRIPT" STATIC_ROOT="$STATIC_ROOT" bash -c '
-    source "$TEST_SCRIPT"
+# Verify SIGTERM before begin_transaction exits cleanly without false rollback warnings.
+pre_tx_log="${TEST_ROOT}/pre-tx.log"
+if NAIVECD_LIB_ONLY=1 NAIVECD_TEST_ROOT="$TEST_ROOT" PROJECT_ROOT="$PROJECT_ROOT" bash -c '
+    source "$PROJECT_ROOT/install.sh"
+    kill -TERM $$
+' >"$pre_tx_log" 2>&1; then
+    pre_tx_status=0
+else
+    pre_tx_status=$?
+fi
+[[ "$pre_tx_status" == "143" ]]
+[[ "$(<"$pre_tx_log")" != *"Rolling back"* ]]
+
+# Verify SIGTERM during an active transaction exits 143 and restores the snapshot.
+if NAIVECD_LIB_ONLY=1 NAIVECD_TEST_ROOT="$TEST_ROOT" PROJECT_ROOT="$PROJECT_ROOT" STATIC_ROOT="$STATIC_ROOT" bash -c '
+    source "$PROJECT_ROOT/install.sh"
     systemctl() {
         case "${1:-}" in
             is-active|is-enabled) return 0 ;;
@@ -99,9 +113,9 @@ fi
 [[ "$signal_status" == "143" ]]
 [[ "$(<"$CADDY_BIN")" == "old-bin" ]]
 
-# 验证普通失败退出同样触发 EXIT 回滚，并保留原退出码。
-if NAIVECD_LIB_ONLY=1 TEST_SCRIPT="$TEST_SCRIPT" STATIC_ROOT="$STATIC_ROOT" bash -c '
-    source "$TEST_SCRIPT"
+# Verify non-zero exit during an active transaction triggers EXIT rollback and preserves exit status.
+if NAIVECD_LIB_ONLY=1 NAIVECD_TEST_ROOT="$TEST_ROOT" PROJECT_ROOT="$PROJECT_ROOT" STATIC_ROOT="$STATIC_ROOT" bash -c '
+    source "$PROJECT_ROOT/install.sh"
     systemctl() { return 0; }
     begin_transaction
     printf failed > "$CADDY_BIN"
@@ -116,6 +130,10 @@ fi
 
 ORIGIN_CADDY_BIN="replaced"
 ORIGINAL_CADDY_BIN_BACKUP="${TEST_ROOT}/original-caddy"
+STATE_DOMAIN="edge.example.com"
+STATE_NAIVE_PORT="8443"
+STATE_COVER_MODE="proxy"
+STATE_MASK_SITE="https://files.pythonhosted.org"
 STATE_CADDY_DIR_METADATA="0:0:700"
 STATE_CADDY_STATE_DIR_METADATA="0:0:750"
 STATE_STATIC_ROOT_METADATA="0:0:700"
@@ -129,6 +147,10 @@ reset_managed_state
 load_managed_state
 [[ "$ORIGIN_CADDY_BIN" == "replaced" ]]
 [[ "$ORIGINAL_CADDY_BIN_BACKUP" == "${TEST_ROOT}/original-caddy" ]]
+[[ "$STATE_DOMAIN" == "edge.example.com" ]]
+[[ "$STATE_NAIVE_PORT" == "8443" ]]
+[[ "$STATE_COVER_MODE" == "proxy" ]]
+[[ "$STATE_MASK_SITE" == "https://files.pythonhosted.org" ]]
 [[ "$STATE_CADDY_STATE_DIR_METADATA" == "0:0:750" ]]
 [[ "$STATE_STATIC_INDEX_METADATA" == "0:0:600" ]]
 [[ "$ORIGINAL_SERVICE_ACTIVE" == "1" ]]
